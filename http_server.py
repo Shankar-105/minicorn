@@ -11,7 +11,7 @@ server_socket.listen(5)   # backlog = how many waiting connections allowed
 
 print(f"Server listening on http://{HOST}:{PORT}")
 
-def read_full_request(client_socket):
+def read_full_request(client_socket : socket):
     # Buffer to accumulate all bytes
     request_bytes = b''
 
@@ -102,48 +102,124 @@ def parse_body(method,headers,body_bytes):
             parsed_body = body_bytes.decode('utf-8', errors='replace')
         return parsed_body
     
+import datetime
+
+def build_response(
+    status_code: int,
+    status_phrase: str,
+    headers: dict = None,
+    body: str | bytes = "",
+    content_type: str = "text/plain"
+) -> bytes:
+    if headers is None:
+        headers = {}
+
+    # Body handling
+    if isinstance(body, str):
+        body_bytes = body.encode("utf-8")
+    else:
+        body_bytes = body
+
+    # Mandatory / useful headers (add if not set by app)
+    final_headers = {
+        "Content-Type": content_type,
+        "Content-Length": str(len(body_bytes)),
+        "Date": datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT"),
+        "Connection": "close",  # for now – later keep-alive
+    }
+    final_headers.update(headers)  # app headers override defaults
+
+    # Status line
+    status_line = f"HTTP/1.1 {status_code} {status_phrase}\r\n"
+
+    # Headers block
+    headers_block = ""
+    for key, value in final_headers.items():
+        headers_block += f"{key}: {value}\r\n"
+
+    # Full response
+    response = (
+        status_line +
+        headers_block +
+        "\r\n"                    # empty line after headers
+    ).encode("utf-8") + body_bytes
+
+    return response
+
 while True:
     # Wait for someone to connect (this blocks until browser connects)
     client_socket, client_address = server_socket.accept()
     print(f"Connection from {client_address}")
 
-    request = read_full_request(client_socket=client_socket)
-    if not request or 'error' in request:
-    # handle error, send 400 or 413
-        status = '400'
-        body=b'Error from the Server'
-        response = (
-            f"HTTP/1.1 {status}\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "\r\n"                          # end of headers
-        ).encode('utf-8') + body
-        client_socket.sendall(response)
-        client_socket.close()
-        continue
+    keep_alive=True
+    while True :
+        request = read_full_request(client_socket=client_socket)
+        if not request or 'error' in request:
+        # handle error, send 400 or 413
+            status = '400'
+            body=b'Error from the Server'
+            response = (
+                f"HTTP/1.1 {status}\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                "\r\n"                          # end of headers
+            ).encode('utf-8') + body
+            client_socket.sendall(response)
+            client_socket.close()
+            continue
+        
+        print(f"Parsed: Method={request.get('method')}, Path={request.get('path')}, Version={request.get('version')}")
+        print(f"Headers: {request.get('headers')}")
+        print(f"Body: {request.get('body_text')}")
+        # Build response (as bytes — very important!)
+        import json
+        if request["method"] == "GET":
+            if request["path"] == "/":
+                status_code, phrase = 200, "OK"
+                body = "<h1>Welcome home!</h1>"
+                content_type = "text/html"
+            elif request["path"] == "/api/hello":
+                status_code, phrase = 200, "OK"
+                body = {"message": "Hello from API"}
+                content_type = "application/json"
+                body = json.dumps(body)  # ← important!
+            else:
+                status_code, phrase = 404, "Not Found"
+                body = "Sorry, nothing here :("
+                content_type = "text/plain"
 
-    print(f"Parsed: Method={request.get('method')}, Path={request.get('path')}, Version={request.get('version')}")
-    print(f"Headers: {request.get('headers')}")
-    print(f"Body: {request.get('body_text')}")
-    # Build response (as bytes — very important!)
-    if request['method'] == 'POST' and request['path'] == '/echo':
-        status = '200 OK'
-        body = f"{request['body_text']}"
-    else:
-        status = '405 Method Not Allowed' if request['method'] != 'GET' else '200 OK'
-        body = "Use POST /echo to see your data"
-    body_bytes = body.encode("utf-8")
+        elif request["method"] == "POST" and request["path"] == "/echo":
+            status_code, phrase = 200, "OK"
+            body = f"You sent: {request.get('parsed_body', 'nothing')}"
+            content_type = "text/plain"
 
-    response = (
-        f"HTTP/1.1 {status}\r\n"
-        f"Content-Type: {request['headers'].get('content-type')}\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        "\r\n"                          # end of headers
-    ).encode('utf-8') + body_bytes      # headers as bytes + body as bytes
+        else:
+            status_code, phrase = 405, "Method Not Allowed"
+            body = f"{request['method']} not allowed here"
+            content_type = "text/plain"
 
-    # Send it back
-    client_socket.sendall(response)
+        body_bytes = body.encode("utf-8")
 
+        connection = request.get('headers').get('connection','').lower()
+
+        if 'close' in connection:
+            keep_alive=False
+            response_headers = {'Connection':'close'}
+        else:
+            response_headers = {'Connection':'keep-alive'}
+        
+        response_bytes = build_response(
+        status_code=status_code,
+        status_phrase=phrase,
+        headers=response_headers,
+        body=body,
+        content_type=content_type
+)      # headers as bytes + body as bytes
+        
+        # Send it back
+        client_socket.sendall(response_bytes)
+        if not keep_alive:
+            break
     # Close this connection (we'll improve later)
     client_socket.close()
     print("Response sent, connection closed\n")
