@@ -11,13 +11,13 @@ server_socket.listen(5)   # backlog = how many waiting connections allowed
 
 print(f"Server listening on http://{HOST}:{PORT}")
 
-def read_full_request(client_socket : socket):
+def read_full_request(c_socket : socket):
     # Buffer to accumulate all bytes
     request_bytes = b''
 
     # Step 1: Read until we have full headers (look for \r\n\r\n)
     while b'\r\n\r\n' not in request_bytes:
-        chunk = client_socket.recv(4096)  # bigger chunk = faster, still safe
+        chunk = c_socket.recv(4096)  # bigger chunk = faster, still safe
         if not chunk:  # Connection closed early
             return None
         request_bytes += chunk
@@ -57,10 +57,10 @@ def read_full_request(client_socket : socket):
             'body': b'Too big!',
             'error': '413'
         }
-
+ 
     remaining = content_length - len(body_so_far)
     while remaining > 0:
-        chunk = client_socket.recv(min(4096, remaining))
+        chunk = c_socket.recv(min(4096, remaining))
         if not chunk:
             break  # closed early — incomplete body
         body_so_far += chunk
@@ -109,7 +109,7 @@ def build_response(
     status_phrase: str,
     headers: dict = None,
     body: str | bytes = "",
-    content_type: str = "text/plain"
+    content_type: str = "application/json"
 ) -> bytes:
     if headers is None:
         headers = {}
@@ -153,7 +153,7 @@ while True:
 
     keep_alive=True
     while True :
-        request = read_full_request(client_socket=client_socket)
+        request = read_full_request(c_socket=client_socket)
         if not request or 'error' in request:
         # handle error, send 400 or 413
             status = '400'
@@ -166,39 +166,55 @@ while True:
             ).encode('utf-8') + body
             client_socket.sendall(response)
             client_socket.close()
-            continue
-        
+            break
+
+        from io import BytesIO
+        import sys
+
+        environ = {
+            'REQUEST_METHOD': request['method'],  # e.g., 'GET'
+            'SCRIPT_NAME': '',  # Simple: root-mounted
+            'PATH_INFO': request['path'].split('?')[0] if '?' in request['path'] else request['path'],  # e.g., '/hello'
+            'QUERY_STRING': request['path'].split('?')[1] if '?' in request['path'] else '',  # e.g., 'name=M'
+            'CONTENT_TYPE': request['headers'].get('content-type', ''),  # Lowercase ok, spec allows
+            'CONTENT_LENGTH': str(len(request['body'])),  # Even if 0
+            'SERVER_NAME': HOST,  # '127.0.0.1'
+            'SERVER_PORT': str(PORT),  # '8000'
+            'SERVER_PROTOCOL': request.get('version', 'HTTP/1.1'),
+            'wsgi.version': (1, 0),
+            'wsgi.url_scheme': 'http',  # Add 'https' logic later
+            'wsgi.input': BytesIO(request['body']),  # Readable stream—app calls .read()
+            'wsgi.errors': sys.stderr,  # For app logging
+            'wsgi.multithread': False,  # Update to True when threaded
+            'wsgi.multiprocess': False,
+            'wsgi.run_once': False,
+        }
+
+        # Add all headers as HTTP_UPPER_KEY (normalize)
+        for key, value in request['headers'].items():
+            upper_key = key.upper().replace('-', '_')  # e.g., 'User-Agent' → 'USER_AGENT'
+            if key.lower() not in ('content-type', 'content-length'):  # Skip duplicates
+                environ[f'HTTP_{upper_key}'] = value
+
+        # Optional: Client info
+        environ['REMOTE_ADDR'] = client_address[0]  # e.g., '127.0.0.1'
+        environ['REMOTE_PORT'] = client_address[1]  # ephemeral port from client
+        print("ENVIRON :")
+        print(environ)
+        response_status = None
+        response_headers = []
+
+        def start_response(status,headers,exc_info=None):
+            global response_status, response_headers  # Or use class/nonlocal
+            if exc_info:  # Error handling (advanced)
+                raise exc_info[1].with_traceback(exc_info[2])
+            response_status = status  # e.g., '200 OK'
+            response_headers = headers  # e.g., [('Content-Type', 'text/plain')]
+            return lambda *args: None  # Optional write func (ignore for now)
+     
         print(f"Parsed: Method={request.get('method')}, Path={request.get('path')}, Version={request.get('version')}")
         print(f"Headers: {request.get('headers')}")
         print(f"Body: {request.get('body_text')}")
-        # Build response (as bytes — very important!)
-        import json
-        if request["method"] == "GET":
-            if request["path"] == "/":
-                status_code, phrase = 200, "OK"
-                body = "<h1>Welcome home!</h1>"
-                content_type = "text/html"
-            elif request["path"] == "/api/hello":
-                status_code, phrase = 200, "OK"
-                body = {"message": "Hello from API"}
-                content_type = "application/json"
-                body = json.dumps(body)  # ← important!
-            else:
-                status_code, phrase = 404, "Not Found"
-                body = "Sorry, nothing here :("
-                content_type = "text/plain"
-
-        elif request["method"] == "POST" and request["path"] == "/echo":
-            status_code, phrase = 200, "OK"
-            body = f"You sent: {request.get('parsed_body', 'nothing')}"
-            content_type = "text/plain"
-
-        else:
-            status_code, phrase = 405, "Method Not Allowed"
-            body = f"{request['method']} not allowed here"
-            content_type = "text/plain"
-
-        body_bytes = body.encode("utf-8")
 
         connection = request.get('headers').get('connection','').lower()
 
@@ -207,15 +223,25 @@ while True:
             response_headers = {'Connection':'close'}
         else:
             response_headers = {'Connection':'keep-alive'}
-        
-        response_bytes = build_response(
-        status_code=status_code,
-        status_phrase=phrase,
-        headers=response_headers,
-        body=body,
-        content_type=content_type
-)      # headers as bytes + body as bytes
-        
+        try:
+            from main import app
+            body_iterable = app.wsgi_app(environ,start_response)  # Call—app must be callable!
+            # Collect chunks (simple; real servers stream send)
+            body_chunks = []
+            for chunk in body_iterable:  # Iterable yields bytes
+                body_chunks.append(chunk)
+            full_body = b''.join(body_chunks)
+        except Exception as e:
+            # App crash? Set 500
+            response_status = '500 Internal Server Error'
+            response_headers = [('Content-Type', 'text/plain')]
+            full_body = b'Error!'
+
+        # Format using your build_response
+        status_code = int(response_status.split(' ')[0])  # 200
+        phrase = ' '.join(response_status.split(' ')[1:])  # OK
+        headers_dict = {k: v for k, v in response_headers}  # For build_response
+        response_bytes = build_response(status_code, phrase, headers_dict,full_body)
         # Send it back
         client_socket.sendall(response_bytes)
         if not keep_alive:
