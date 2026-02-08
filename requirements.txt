@@ -1,0 +1,8 @@
+# Core dependencies (none - stdlib only)
+
+# For auto-reload support (--reload flag)
+watchdog>=3.0.0
+
+# Development dependencies
+flask>=2.0.0    # For testing with a real WSGI app
+pytest>=7.0.0   # For running tests
