@@ -1,7 +1,7 @@
 venv/
-WSGI.md 
 Simple-CRUD-Flask-App-master
 ex.py
 rhino.egg-info
 __pycache__/
 *.md
+wsgi_server.py

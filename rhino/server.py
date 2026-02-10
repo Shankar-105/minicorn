@@ -1,6 +1,5 @@
 """
 rhino/server.py — Production-grade synchronous WSGI server core.
-
 Designed to serve any PEP 3333 compliant WSGI application (Flask, Django, etc.)
 with Gunicorn-level robustness for the synchronous / blocking model.
 """
@@ -28,7 +27,6 @@ RECV_CHUNK = 8192                   # bytes per recv call
 # Module-level logger (configured by CLI or calling code)
 log = logging.getLogger("rhino")
 
-
 # HTTP status code Error Helpers
 _STATUS_PHRASES = {
     200: "OK",
@@ -40,13 +38,11 @@ _STATUS_PHRASES = {
     502: "Bad Gateway",
 }
 
-
 def _http_date() -> str:
     """RFC 7231 date for the Date header."""
     return datetime.datetime.now(datetime.timezone.utc).strftime(
         "%a, %d %b %Y %H:%M:%S GMT"
     )
-
 
 def _build_error_response(status_code: int, message: str = "") -> bytes:
     """Build a minimal, valid HTTP/1.1 error response."""
@@ -61,7 +57,6 @@ def _build_error_response(status_code: int, message: str = "") -> bytes:
         f"\r\n"
     ).encode("utf-8") + body
 
-
 def _safe_send(sock: socket.socket, data: bytes) -> bool:
     """Send data, returning False if client disconnected."""
     try:
@@ -70,11 +65,9 @@ def _safe_send(sock: socket.socket, data: bytes) -> bool:
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
         return False
 
-
 def _sanitize_header_value(value: str) -> str:
     """Strip CR / LF to prevent header injection attacks."""
     return value.replace("\r", "").replace("\n", "")
-
 
 class _RequestError(Exception):
     """Raised when request parsing detects a client error."""
@@ -82,7 +75,6 @@ class _RequestError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
-
 
 def read_full_request(sock: socket.socket) -> dict | None:
     """
@@ -124,7 +116,7 @@ def read_full_request(sock: socket.socket) -> dict | None:
         raise _RequestError(400, "Empty request")
 
     request_line = lines[0]
-    parts = request_line.split(None, 2)
+    parts = request_line.split(None,2)
     if len(parts) != 3:
         raise _RequestError(400, f"Malformed request line: {request_line!r}")
     method, raw_path, version = parts
@@ -183,7 +175,6 @@ def read_full_request(sock: socket.socket) -> dict | None:
         "body": body,
     }
 
-
 def build_environ(request: dict, client_addr: tuple, host: str, port: int) -> dict:
     """
     Build a PEP 3333 compliant environ dictionary from a parsed request.
@@ -233,7 +224,6 @@ def build_environ(request: dict, client_addr: tuple, host: str, port: int) -> di
 
     return environ
 
-
 class _FileWrapper:
     """
     wsgi.file_wrapper — wraps a file-like object for efficient iteration.
@@ -251,7 +241,6 @@ class _FileWrapper:
             if not data:
                 break
             yield data
-
 
 def send_response(
     sock: socket.socket,
@@ -326,7 +315,6 @@ def send_response(
 
     return True
 
-
 def make_start_response():
     """
     Factory that returns (start_response_callable, state_dict).
@@ -360,7 +348,6 @@ def make_start_response():
 
     return start_response, state
 
-
 def _wants_keep_alive(request: dict) -> bool:
     """Return True if the client wants (and is allowed) to keep-alive."""
     conn = request["headers"].get("connection", "").lower()
@@ -369,15 +356,12 @@ def _wants_keep_alive(request: dict) -> bool:
         return "close" not in conn
     return "keep-alive" in conn
 
-
 def load_app(app_path: str) -> Callable:
     """
     Load a WSGI application from a module:attribute string.
-    
     Examples:
         "main:app" → from main import app
         "myproject.api:application" → from myproject.api import application
-    
     If the loaded object has a `.wsgi_app` attribute (like Flask), use that instead.
     """
     if ":" not in app_path:
@@ -419,18 +403,15 @@ def load_app(app_path: str) -> Callable:
     
     return app
 
-
 class Server:
     """
     A configurable WSGI server instance.
-    
     Attributes:
         host: Bind address
         port: Bind port
         app: The WSGI application callable
         should_exit: Flag to signal server shutdown
     """
-    
     def __init__(
         self,
         app: Callable,
@@ -456,11 +437,10 @@ class Server:
             except OSError:
                 pass
             self._server_socket = None
-    
+  
     def serve(self):
         """Create, bind, listen, and accept connections in a blocking loop."""
         import os
-        
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
@@ -484,19 +464,18 @@ class Server:
             except OSError:
                 if self.should_exit:
                     break
-                log.error("accept() failed", exc_info=True)
+                log.error("accept() failed",exc_info=True)
                 continue
             
-            log.debug("New connection from %s:%s", client_addr[0], client_addr[1])
+            log.debug("New connection from %s:%s", client_addr[0],client_addr[1])
             self._handle_connection(client_socket, client_addr)
         
         self.shutdown()
         log.info("Server stopped")
     
-    def _handle_connection(self, client_socket: socket.socket, client_addr: tuple):
+    def _handle_connection(self,client_socket: socket.socket,client_addr: tuple):
         """Handle one TCP connection (potentially many keep-alive requests)."""
         requests_served = 0
-
         try:
             for request_num in range(1, MAX_KEEP_ALIVE_REQUESTS + 1):
                 if self.should_exit:
@@ -504,7 +483,6 @@ class Server:
                 
                 timeout = RECV_TIMEOUT if request_num == 1 else KEEP_ALIVE_TIMEOUT
                 client_socket.settimeout(timeout)
-
                 try:
                     request = read_full_request(client_socket)
                 except _RequestError as exc:
@@ -519,7 +497,7 @@ class Server:
                     log.error("Unexpected error reading request", exc_info=True)
                     _safe_send(client_socket, _build_error_response(400))
                     return
-
+                
                 if request is None:
                     log.debug(
                         "%s:%s closed connection after %d request(s)",
@@ -599,11 +577,9 @@ class Server:
                 client_addr[0], client_addr[1], requests_served,
             )
 
-
 def serve(app_path: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
     """
     Load and serve a WSGI application.
-    
     Args:
         app_path: Module path in format "module:attribute" (e.g., "main:app")
         host: Host address to bind to
@@ -613,11 +589,9 @@ def serve(app_path: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
     server = Server(app, host, port)
     server.serve()
 
-
 def run(app: Callable, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
     """
     Serve a WSGI application directly (already imported).
-    
     Args:
         app: A WSGI callable
         host: Host address to bind to

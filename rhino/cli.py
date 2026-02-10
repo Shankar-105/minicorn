@@ -33,9 +33,7 @@ def setup_logging(level: int = logging.INFO):
 log = setup_logging()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Reload Watcher using watchdog
-# ─────────────────────────────────────────────────────────────────────────────
 
 class ReloadManager:
     """
@@ -219,26 +217,24 @@ except KeyboardInterrupt:
             log.info("Shutdown complete")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Direct server runner (no reload)
-# ─────────────────────────────────────────────────────────────────────────────
 
-def run_server_direct(args: argparse.Namespace):
+def run_server_direct(args:argparse.Namespace):
     """Run the server directly in the current process (no reload)."""
     try:
         app = load_app(args.app)
     except (ValueError, ImportError, AttributeError, TypeError) as e:
         log.error("Failed to load application: %s", e)
         sys.exit(1)
-    
-    server = Server(app, args.host, args.port)
+        
+    server = Server(app,args.host,args.port)
     
     def signal_handler(signum, frame):
         log.info("Received shutdown signal")
         server.signal_exit()
     
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT,signal_handler)
+    signal.signal(signal.SIGTERM,signal_handler)
     
     try:
         server.serve()
@@ -251,9 +247,7 @@ def run_server_direct(args: argparse.Namespace):
         server.shutdown()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CLI Entry Point
-# ─────────────────────────────────────────────────────────────────────────────
 
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the CLI."""
@@ -305,7 +299,6 @@ Examples:
     
     return parser
 
-
 def main(args: Optional[list[str]] = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -324,9 +317,7 @@ def main(args: Optional[list[str]] = None) -> int:
         manager.run_with_reload()
     else:
         run_server_direct(parsed_args)
-    
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
