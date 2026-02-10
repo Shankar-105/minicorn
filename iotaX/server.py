@@ -1,5 +1,5 @@
 """
-rhino/server.py — Production-grade synchronous WSGI server core.
+iotaX/server.py — Production-grade synchronous WSGI server core.
 Designed to serve any PEP 3333 compliant WSGI application (Flask, Django, etc.)
 with Gunicorn-level robustness for the synchronous / blocking model.
 """
@@ -25,7 +25,7 @@ MAX_KEEP_ALIVE_REQUESTS = 100       # max requests per single TCP connection
 RECV_CHUNK = 8192                   # bytes per recv call
 
 # Module-level logger (configured by CLI or calling code)
-log = logging.getLogger("rhino")
+log = logging.getLogger("iotaX")
 
 # HTTP status code Error Helpers
 _STATUS_PHRASES = {
@@ -271,7 +271,7 @@ def send_response(
     hdr_lines = ""
 
     hdr_lines += f"Date: {_http_date()}\r\n"
-    hdr_lines += "Server: rhino/0.1.0\r\n"
+    hdr_lines += "Server: iotaX/0.1.0\r\n"
 
     if keep_alive:
         hdr_lines += "Connection: keep-alive\r\n"

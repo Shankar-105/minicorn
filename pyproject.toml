@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rhino"
+name = "iotaX"
 version = "0.1.0"
-description = "A lightweight, production-grade synchronous WSGI server with auto-reload support"
+description = "iotaX - A lightweight, production-grade synchronous WSGI server with auto-reload support"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -30,24 +30,21 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-reload = ["watchdog>=3.0.0"]
 dev = [
     "watchdog>=3.0.0",
-    "pytest>=7.0.0",
-    "flask>=2.0.0",
 ]
 
 [project.scripts]
-rhino = "rhino.cli:main"
+iotaX = "iotaX.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Shankar-105/rhino"
-Documentation = "https://github.com/Shankar-105/rhino#readme"
-Repository = "https://github.com/Shankar-105/rhino"
+Homepage = "https://github.com/Shankar-105/iotaX"
+Documentation = "https://github.com/Shankar-105/iotaX#readme"
+Repository = "https://github.com/Shankar-105/iotaX"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["rhino*"]
+include = ["iotaX*"]
 
 [tool.setuptools.package-data]
-rhino = ["py.typed"]
+iotaX = ["py.typed"]

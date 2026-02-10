@@ -1,7 +1,9 @@
 venv/
-Simple-CRUD-Flask-App-master
 ex.py
-rhino.egg-info
+iotaX.egg-info
+dist
 __pycache__/
-*.md
-wsgi_server.py
+CLI_AND_SERVER_DEEP_DIVE.md
+DEEP_DIVE_EXECUTION.md
+.dockerignore
+Dockerfile

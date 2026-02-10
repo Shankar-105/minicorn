@@ -1,5 +1,5 @@
 """
-rhino/cli.py — Command-line interface for the Rhino WSGI server.
+iotaX/cli.py — Command-line interface for the iotaX WSGI server.
 
 Provides Uvicorn/Gunicorn-like CLI experience with auto-reload support.
 """
@@ -13,8 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from rhino import __version__
-from rhino.server import Server, load_app, DEFAULT_HOST, DEFAULT_PORT
+from iotaX import __version__
+from iotaX.server import Server, load_app, DEFAULT_HOST, DEFAULT_PORT
 
 # Configure logging with nice formatting
 def setup_logging(level: int = logging.INFO):
@@ -24,8 +24,8 @@ def setup_logging(level: int = logging.INFO):
         format="\033[32m%(levelname)s\033[0m:     %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-    # Also configure the rhino logger
-    logger = logging.getLogger("rhino")
+    # Also configure the iotaX logger
+    logger = logging.getLogger("iotaX")
     logger.setLevel(level)
     return logger
 
@@ -93,7 +93,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
 )
-from rhino.server import serve
+from iotaX.server import serve
 try:
     serve({self.args.app!r}, {self.args.host!r}, {self.args.port})
 except KeyboardInterrupt:
@@ -136,7 +136,7 @@ except KeyboardInterrupt:
         """Run the server with auto-reload enabled."""
         try:
             from watchdog.observers import Observer
-            from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreatedEvent
+            from watchdog.events import FileSystemEventHandler
         except ImportError:
             log.error(
                 "watchdog package is required for --reload. "
@@ -252,15 +252,15 @@ def run_server_direct(args:argparse.Namespace):
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the CLI."""
     parser = argparse.ArgumentParser(
-        prog="rhino",
-        description="Rhino - A lightweight, production-grade WSGI server",
+        prog="iotaX",
+        description="iotaX - A lightweight, production-grade WSGI server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  rhino main:app                         Run app from main.py
-  rhino myproject.api:app --port 8080    Run on custom port
-  rhino main:app --reload                Run with auto-reload
-  rhino app:create_app() --host 0.0.0.0  Bind to all interfaces
+  iotaX main:app                         Run app from main.py
+  iotaX myproject.api:app --port 8080    Run on custom port
+  iotaX main:app --reload                Run with auto-reload
+  iotaX app:create_app() --host 0.0.0.0  Bind to all interfaces
         """,
     )
     
@@ -305,7 +305,7 @@ def main(args: Optional[list[str]] = None) -> int:
     parsed_args = parser.parse_args(args)
     
     # Print startup banner
-    print(f"\033[1m\033[34mRhino\033[0m v{__version__}")
+    print(f"\033[1m\033[34miotaX\033[0m v{__version__}")
     print(f"Running \033[1m{parsed_args.app}\033[0m")
     print(f"Address: http://{parsed_args.host}:{parsed_args.port}")
     if parsed_args.reload:
