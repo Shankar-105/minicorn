@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "iotaX"
-version = "0.1.1"
-description = "iotaX - A lightweight, production-grade synchronous WSGI server with auto-reload support"
+name = "minicorn"
+version = "0.1.0"
+description = "minicorn - A lightweight, production-grade synchronous WSGI server with auto-reload support"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -35,16 +35,16 @@ dev = [
 ]
 
 [project.scripts]
-iotaX = "iotaX.cli:main"
+minicorn = "minicorn.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Shankar-105/iotaX"
-Documentation = "https://github.com/Shankar-105/iotaX#readme"
-Repository = "https://github.com/Shankar-105/iotaX"
+Homepage = "https://github.com/Shankar-105/minicorn"
+Documentation = "https://github.com/Shankar-105/minicorn#readme"
+Repository = "https://github.com/Shankar-105/minicorn"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["iotaX*"]
+include = ["minicorn*"]
 
 [tool.setuptools.package-data]
-iotaX = ["py.typed"]
+minicorn = ["py.typed"]

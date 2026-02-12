@@ -1,8 +1,8 @@
-# iotaX 🔥
+# minicorn 🔥
 
 A lightweight, production-grade synchronous WSGI server with auto-reload support.
 
-iotaX provides a simple CLI experience similar to Uvicorn and Gunicorn, designed to serve any PEP 3333 compliant WSGI application (Flask, Django, etc.) with robust features for both development and production use.
+minicorn provides a simple CLI experience similar to Uvicorn and Gunicorn, designed to serve any PEP 3333 compliant WSGI application (Flask, Django, etc.) with robust features for both development and production use.
 
 ## Features
 
@@ -16,13 +16,13 @@ iotaX provides a simple CLI experience similar to Uvicorn and Gunicorn, designed
 ## Installation
 
 ```bash
-pip install iotaX
+pip install minicorn
 
 # Install with auto-reload support
-pip install "iotaX[reload]"
+pip install "minicorn[reload]"
 
 # Or install all dev dependencies
-pip install "iotaX[dev]"
+pip install "minicorn[dev]"
 ```
 
 ## Quick Start
@@ -31,19 +31,19 @@ pip install "iotaX[dev]"
 
 ```bash
 # Run a Flask app
-iotaX main:app
+minicorn main:app
 
 # Run with custom host/port
-iotaX main:app --host 0.0.0.0 --port 8080
+minicorn main:app --host 0.0.0.0 --port 8080
 
 # Run with auto-reload (development)
-iotaX main:app --reload
+minicorn main:app --reload
 ```
 
 ### Using with Python -m
 
 ```bash
-python -m iotaX main:app --reload
+python -m minicorn main:app --reload
 ```
 
 ### Application Path Format
@@ -52,21 +52,21 @@ The application path follows the format `module:attribute`:
 
 ```bash
 # Simple module
-iotaX main:app              # from main import app
+minicorn main:app              # from main import app
 
 # Nested module
-iotaX myproject.api:app     # from myproject.api import app
+minicorn myproject.api:app     # from myproject.api import app
 
 # Package
-iotaX myapp.wsgi:application  # from myapp.wsgi import application
+minicorn myapp.wsgi:application  # from myapp.wsgi import application
 ```
 
 ## CLI Reference
 
 ```
-usage: iotaX [-h] [--host HOST] [--port PORT] [--reload] [--version] APP
+usage: minicorn [-h] [--host HOST] [--port PORT] [--reload] [--version] APP
 
-iotaX - A lightweight, production-grade WSGI server
+minicorn - A lightweight, production-grade WSGI server
 
 positional arguments:
   APP          WSGI application in format 'module:attribute' (e.g., 'main:app')
@@ -79,18 +79,18 @@ options:
   --version    show program's version number and exit
 
 Examples:
-  iotaX main:app                         Run app from main.py
-  iotaX myproject.api:app --port 8080    Run on custom port
-  iotaX main:app --reload                Run with auto-reload
-  iotaX app:create_app() --host 0.0.0.0  Bind to all interfaces
+  minicorn main:app                         Run app from main.py
+  minicorn myproject.api:app --port 8080    Run on custom port
+  minicorn main:app --reload                Run with auto-reload
+  minicorn app:create_app() --host 0.0.0.0  Bind to all interfaces
 ```
 
 ## Programmatic Usage
 
-You can also use iotaX directly in Python code:
+You can also use minicorn directly in Python code:
 
 ```python
-from iotaX import serve, run
+from minicorn import serve, run
 
 # Using module path
 serve("main:app", host="0.0.0.0", port=8080)
@@ -103,7 +103,7 @@ run(app, host="127.0.0.1", port=8000)
 Or use the Server class for more control:
 
 ```python
-from iotaX.server import Server, load_app
+from minicorn.server import Server, load_app
 
 app = load_app("main:app")
 server = Server(app, host="127.0.0.1", port=8000)
@@ -116,15 +116,15 @@ server.serve()
 
 ## Auto-Reload Mode
 
-When using `--reload`, iotaX watches for changes to `.py` files in your project directory:
+When using `--reload`, minicorn watches for changes to `.py` files in your project directory:
 
 ```bash
-iotaX main:app --reload
+minicorn main:app --reload
 ```
 
 Output:
 ```
-iotaX v0.1.0
+minicorn v0.1.0
 Running main:app
 Address: http://127.0.0.1:8000
 Auto-reload enabled (development mode)
@@ -154,12 +154,12 @@ The reload watcher automatically excludes:
 
 ### Architecture
 
-iotaX is a **synchronous, single-threaded** WSGI server. Each connection is handled sequentially, making it simple and predictable. For high-concurrency production workloads, consider using it behind a reverse proxy or switching to an async server.
+minicorn is a **synchronous, single-threaded** WSGI server. Each connection is handled sequentially, making it simple and predictable. For high-concurrency production workloads, consider using it behind a reverse proxy or switching to an async server.
 
 ### Key Concepts
 
 1. **Module Reloading** (`importlib.reload`)  
-   When `--reload` is enabled, iotaX uses `importlib.reload()` to re-import the application module after detecting file changes, allowing code updates without a full process restart.
+   When `--reload` is enabled, minicorn uses `importlib.reload()` to re-import the application module after detecting file changes, allowing code updates without a full process restart.
 
 2. **Watchdog File Monitoring**  
    The [watchdog](https://pythonhosted.org/watchdog/) library provides cross-platform file system event monitoring. It watches for file creation, modification, and deletion events, triggering a reload when `.py` files change.
@@ -198,20 +198,20 @@ app = Flask(__name__)
 
 @app.route("/")
 def hello():
-    return "Hello from iotaX! 🔥"
+    return "Hello from minicorn! 🔥"
 
 @app.route("/api/data")
 def data():
-    return {"message": "Hello", "server": "iotaX"}
+    return {"message": "Hello", "server": "minicorn"}
 
 if __name__ == "__main__":
-    # For development without iotaX CLI:
+    # For development without minicorn CLI:
     app.run()
 ```
 
 Run with:
 ```bash
-iotaX main:app --reload
+minicorn main:app --reload
 ```
 
 ## License

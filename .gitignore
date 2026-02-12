@@ -1,6 +1,6 @@
 venv/
 ex.py
-iotaX.egg-info
+minicorn.egg-info
 dist
 __pycache__/
 CLI_AND_SERVER_DEEP_DIVE.md
