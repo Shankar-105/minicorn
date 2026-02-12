@@ -18,9 +18,6 @@ minicorn provides a simple CLI experience similar to Uvicorn and Gunicorn, desig
 ```bash
 pip install minicorn
 
-# Install with auto-reload support
-pip install "minicorn[reload]"
-
 # Or install all dev dependencies
 pip install "minicorn[dev]"
 ```
@@ -30,13 +27,13 @@ pip install "minicorn[dev]"
 ### Basic Usage
 
 ```bash
-# Run a Flask app
+# Run a WSGI app
 minicorn main:app
 
 # Run with custom host/port
 minicorn main:app --host 0.0.0.0 --port 8080
 
-# Run with auto-reload (development)
+# Run with auto-reload (development hot reload)
 minicorn main:app --reload
 ```
 
@@ -55,10 +52,8 @@ The application path follows the format `module:attribute`:
 minicorn main:app              # from main import app
 
 # Nested module
-minicorn myproject.api:app     # from myproject.api import app
+minicorn myproject.app:app     # from myproject.app import app
 
-# Package
-minicorn myapp.wsgi:application  # from myapp.wsgi import application
 ```
 
 ## CLI Reference
@@ -98,20 +93,6 @@ serve("main:app", host="0.0.0.0", port=8080)
 # Using app directly
 from myapp import app
 run(app, host="127.0.0.1", port=8000)
-```
-
-Or use the Server class for more control:
-
-```python
-from minicorn.server import Server, load_app
-
-app = load_app("main:app")
-server = Server(app, host="127.0.0.1", port=8000)
-
-# In a signal handler or elsewhere:
-# server.signal_exit()  # Gracefully stop
-
-server.serve()
 ```
 
 ## Auto-Reload Mode
@@ -154,7 +135,7 @@ The reload watcher automatically excludes:
 
 ### Architecture
 
-minicorn is a **synchronous, single-threaded** WSGI server. Each connection is handled sequentially, making it simple and predictable. For high-concurrency production workloads, consider using it behind a reverse proxy or switching to an async server.
+minicorn is a **synchronous, single-threaded** WSGI server. Each connection is handled sequentially.
 
 ### Key Concepts
 
