@@ -16,9 +16,12 @@ from urllib.parse import unquote
 
 # Default Configuration
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8888
+DEFAULT_PORT = 8000
 MAX_HEADER_SIZE = 64 * 1024         # 64 KB — reject oversized headers
 MAX_BODY_SIZE = 1 * 1024 * 1024     # 1 MB — reject oversized bodies
+RECV_TIMEOUT = 10.0                 # seconds before recv times out (408)
+KEEP_ALIVE_TIMEOUT = 15.0           # idle timeout between kept-alive requests
+MAX_KEEP_ALIVE_REQUESTS = 100       # max requests per single TCP connection
 RECV_CHUNK = 8192                   # bytes per recv call
 
 # Module-level logger (configured by CLI or calling code)
@@ -99,13 +102,13 @@ def load_app(app_path: str) -> Callable:
     
     return app
 
-
-async def _read_request(reader: asyncio.StreamReader) -> dict | None:
+async def _read_request(reader: asyncio.StreamReader, timeout: float = RECV_TIMEOUT) -> dict | None:
     """
     Read and parse one HTTP request from the stream.
     Returns a dict with keys:
         method, path, raw_path, query_string, version, headers, body
     or None when the peer closes the connection cleanly.
+    Raises ValueError on malformed / oversized / timed-out requests.
     """
     # Read headers
     header_data = b""
@@ -113,7 +116,7 @@ async def _read_request(reader: asyncio.StreamReader) -> dict | None:
         if len(header_data) > MAX_HEADER_SIZE:
             raise ValueError("Headers exceed maximum allowed size")
         try:
-            chunk = await asyncio.wait_for(reader.read(RECV_CHUNK), timeout=30.0)
+            chunk = await asyncio.wait_for(reader.read(RECV_CHUNK),timeout=timeout)
         except asyncio.TimeoutError:
             raise ValueError("Request timeout")
         if not chunk:
@@ -165,10 +168,13 @@ async def _read_request(reader: asyncio.StreamReader) -> dict | None:
     body = body_start
     while len(body) < content_length:
         remaining = content_length - len(body)
-        chunk = await asyncio.wait_for(
-            reader.read(min(remaining, RECV_CHUNK)), 
-            timeout=30.0
-        )
+        try:
+            chunk = await asyncio.wait_for(
+                reader.read(min(remaining, RECV_CHUNK)), 
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            raise ValueError("Timeout reading request body")
         if not chunk:
             break
         body += chunk
@@ -214,6 +220,132 @@ def _build_scope(
         "server": (server_host, server_port),
         "client": client_addr,
     }
+
+
+def _wants_keep_alive(request: dict) -> bool:
+    """Return True if the client wants (and is allowed) to keep-alive."""
+    conn = request["headers"].get("connection", "").lower()
+    version = request["version"]
+    if version == "HTTP/1.1":
+        # HTTP/1.1 defaults to keep-alive unless "close" is specified
+        return "close" not in conn
+    # HTTP/1.0 requires explicit "keep-alive"
+    return "keep-alive" in conn
+
+
+class ASGIResponseHandler:
+    """
+    Handles ASGI receive/send lifecycle for a single HTTP request.
+    
+    Encapsulates the state and callbacks for communication between
+    the ASGI application and the HTTP connection.
+    """
+    
+    def __init__(
+        self,
+        writer: asyncio.StreamWriter,
+        request_body: bytes,
+        keep_alive: bool = True,
+    ):
+        self.writer = writer
+        self.request_body = request_body
+        self.keep_alive = keep_alive
+        
+        # State tracking
+        self.body_sent = False
+        self.response_started = False
+        self.response_status = 200
+        self.response_complete = False
+    
+    async def receive(self) -> dict:
+        """
+        ASGI receive callable.
+        
+        Returns the request body on first call, then signals disconnect.
+        """
+        if self.body_sent:
+            # After body is consumed, signal disconnect
+            return {"type": "http.disconnect"}
+        
+        self.body_sent = True
+        return {
+            "type": "http.request",
+            "body": self.request_body,
+            "more_body": False,
+        }
+    
+    async def send(self, message: dict):
+        """
+        ASGI send callable.
+        
+        Handles http.response.start and http.response.body messages.
+        """
+        if message["type"] == "http.response.start":
+            await self._send_response_start(message)
+        
+        elif message["type"] == "http.response.body":
+            await self._send_response_body(message)
+    
+    async def _send_response_start(self, message: dict):
+        """Handle http.response.start message."""
+        self.response_started = True
+        self.response_status = message["status"]
+        status_phrase = _STATUS_PHRASES.get(self.response_status, "")
+        
+        # Build and write response line
+        response_line = f"HTTP/1.1 {self.response_status} {status_phrase}\r\n"
+        self.writer.write(response_line.encode("latin-1"))
+        
+        # Write headers
+        headers = message.get("headers", [])
+        has_date = False
+        has_server = False
+        has_connection = False
+        
+        for name, value in headers:
+            if isinstance(name, bytes):
+                name = name.decode("latin-1")
+            if isinstance(value, bytes):
+                value = value.decode("latin-1")
+            
+            name_lower = name.lower()
+            if name_lower == "date":
+                has_date = True
+            elif name_lower == "server":
+                has_server = True
+            elif name_lower == "connection":
+                has_connection = True
+            
+            self.writer.write(f"{name}: {value}\r\n".encode("latin-1"))
+        
+        # Add default headers
+        if not has_date:
+            self.writer.write(f"Date: {_http_date()}\r\n".encode("latin-1"))
+        if not has_server:
+            self.writer.write(b"Server: minicorn\r\n")
+        if not has_connection:
+            if self.keep_alive:
+                self.writer.write(
+                    f"Connection: keep-alive\r\n"
+                    f"Keep-Alive: timeout={int(KEEP_ALIVE_TIMEOUT)}, max={MAX_KEEP_ALIVE_REQUESTS}\r\n"
+                    .encode("latin-1")
+                )
+            else:
+                self.writer.write(b"Connection: close\r\n")
+        
+        self.writer.write(b"\r\n")
+        await self.writer.drain()
+    
+    async def _send_response_body(self, message: dict):
+        """Handle http.response.body message."""
+        body = message.get("body", b"")
+        if body:
+            self.writer.write(body)
+            await self.writer.drain()
+        
+        # Check if this is the final body chunk
+        if not message.get("more_body", False):
+            self.response_complete = True
 
 
 class ASGIServer:
@@ -292,124 +424,110 @@ class ASGIServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ):
-        """Handle one client connection."""
+        """Handle one TCP connection (potentially many keep-alive requests)."""
         client_addr = writer.get_extra_info("peername")
         if client_addr is None:
             client_addr = ("unknown", 0)
         
+        requests_served = 0
+        
         try:
-            # Read the HTTP request
-            try:
-                request = await _read_request(reader)
-            except ValueError as e:
-                log.warning("%s:%s → 400 %s", client_addr[0], client_addr[1], e)
-                writer.write(_build_error_response(400, str(e)))
-                await writer.drain()
-                return
-            
-            if request is None:
-                # Clean close
-                return
-            
-            log.info(
-                '%s:%s - "%s %s %s"',
-                client_addr[0], client_addr[1],
-                request["method"], request["raw_path"], request["version"],
-            )
-            
-            # Build ASGI scope
-            scope = _build_scope(request, client_addr, self.host, self.port)
-            
-            # State for receive/send
-            body_sent = False
-            request_body = request["body"]
-            response_started = False
-            response_status = 200
-            
-            async def receive() -> dict:
-                """ASGI receive callable."""
-                nonlocal body_sent
-                if body_sent:
-                    # Simulate disconnect after body is consumed
-                    return {"type": "http.disconnect"}
-                body_sent = True
-                return {
-                    "type": "http.request",
-                    "body": request_body,
-                    "more_body": False,
-                }
-            
-            async def send(message: dict):
-                """ASGI send callable."""
-                nonlocal response_started, response_status
+            for request_num in range(1, MAX_KEEP_ALIVE_REQUESTS + 1):
+                if self.should_exit:
+                    break
                 
-                if message["type"] == "http.response.start":
-                    response_started = True
-                    response_status = message["status"]
-                    status_phrase = _STATUS_PHRASES.get(response_status, "")
-                    
-                    # Build response line
-                    response_line = f"HTTP/1.1 {response_status} {status_phrase}\r\n"
-                    writer.write(response_line.encode("latin-1"))
-                    
-                    # Write headers
-                    headers = message.get("headers", [])
-                    has_date = False
-                    has_server = False
-                    
-                    for name, value in headers:
-                        if isinstance(name, bytes):
-                            name = name.decode("latin-1")
-                        if isinstance(value, bytes):
-                            value = value.decode("latin-1")
-                        
-                        if name.lower() == "date":
-                            has_date = True
-                        if name.lower() == "server":
-                            has_server = True
-                        
-                        writer.write(f"{name}: {value}\r\n".encode("latin-1"))
-                    
-                    # Add default headers
-                    if not has_date:
-                        writer.write(f"Date: {_http_date()}\r\n".encode("latin-1"))
-                    if not has_server:
-                        writer.write(b"Server: minicorn\r\n")
-                    
-                    writer.write(b"\r\n")
+                # Use shorter timeout for subsequent keep-alive requests
+                timeout = RECV_TIMEOUT if request_num == 1 else KEEP_ALIVE_TIMEOUT
+                
+                # Read the HTTP request
+                try:
+                    request = await _read_request(reader, timeout=timeout)
+                except ValueError as e:
+                    error_msg = str(e)
+                    if "timeout" in error_msg.lower():
+                        # Timeout on keep-alive is normal, just close
+                        if request_num > 1:
+                            log.debug(
+                                "%s:%s keep-alive timeout after %d request(s)",
+                                client_addr[0], client_addr[1], requests_served
+                            )
+                            return
+                        log.warning("%s:%s → 408 %s", client_addr[0], client_addr[1], e)
+                        writer.write(_build_error_response(408, str(e)))
+                    else:
+                        log.warning("%s:%s → 400 %s", client_addr[0], client_addr[1], e)
+                        writer.write(_build_error_response(400, str(e)))
                     await writer.drain()
+                    return
+                except Exception:
+                    log.error("Unexpected error reading request", exc_info=True)
+                    writer.write(_build_error_response(400))
+                    await writer.drain()
+                    return
                 
-                elif message["type"] == "http.response.body":
-                    body = message.get("body", b"")
-                    if body:
-                        writer.write(body)
+                if request is None:
+                    # Clean close by client
+                    log.debug(
+                        "%s:%s closed connection after %d request(s)",
+                        client_addr[0], client_addr[1], requests_served
+                    )
+                    return
+                
+                # Determine keep-alive
+                keep_alive = _wants_keep_alive(request)
+                if request_num >= MAX_KEEP_ALIVE_REQUESTS:
+                    keep_alive = False
+                
+                log.info(
+                    '%s:%s - "%s %s %s"',
+                    client_addr[0], client_addr[1],
+                    request["method"], request["raw_path"], request["version"],
+                )
+                
+                # Build ASGI scope
+                scope = _build_scope(request, client_addr, self.host, self.port)
+                
+                # Create response handler
+                handler = ASGIResponseHandler(
+                    writer=writer,
+                    request_body=request["body"],
+                    keep_alive=keep_alive,
+                )
+                
+                # Call the ASGI application
+                try:
+                    await self.app(scope, handler.receive, handler.send)
+                except Exception as e:
+                    log.error("ASGI app raised an exception: %s", e, exc_info=True)
+                    if not handler.response_started:
+                        writer.write(_build_error_response(500, "Internal Server Error"))
                         await writer.drain()
-            
-            # Call the ASGI application
-            try:
-                await self.app(scope, receive, send)
-            except Exception as e:
-                log.error("ASGI app raised an exception: %s", e, exc_info=True)
-                if not response_started:
-                    writer.write(_build_error_response(500, "Internal Server Error"))
-                    await writer.drain()
-                return
-            
-            log.info(
-                '%s:%s - "%s %s" %s',
-                client_addr[0], client_addr[1],
-                request["method"], request["raw_path"],
-                response_status,
-            )
+                    return
+                
+                log.info(
+                    '%s:%s - "%s %s" %s',
+                    client_addr[0], client_addr[1],
+                    request["method"], request["raw_path"],
+                    handler.response_status,
+                )
+                requests_served += 1
+                
+                # Stop if not keeping alive
+                if not keep_alive:
+                    return
         
         except Exception as e:
-            log.error("Error handling connection: %s", e, exc_info=True)
+            log.error("Fatal error in connection handler: %s", e, exc_info=True)
         finally:
             try:
                 writer.close()
                 await writer.wait_closed()
             except Exception:
                 pass
+            log.debug(
+                "%s:%s connection closed (%d request(s) served)",
+                client_addr[0], client_addr[1], requests_served
+            )
 
 
 def serve_asgi(app_path: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
