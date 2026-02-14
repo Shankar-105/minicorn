@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from minicorn import __version__
-from minicorn.server import Server, load_app, DEFAULT_HOST, DEFAULT_PORT
+from minicorn.wsgi_server import Server, load_app, DEFAULT_HOST, DEFAULT_PORT
 
 # Configure logging with nice formatting
 def setup_logging(level: int = logging.INFO):
@@ -83,23 +83,44 @@ class ReloadManager:
     
     def _build_subprocess_args(self) -> list[str]:
         """Build the command line args to run the server subprocess."""
-        return [
-            sys.executable,
-            "-c",
-            f"""
+        if getattr(self.args, 'asgi', False):
+            # ASGI mode
+            return [
+                sys.executable,
+                "-c",
+                f"""
 import sys
 import logging
 logging.basicConfig(
     level=logging.INFO,
     format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
 )
-from minicorn.server import serve
+from minicorn.asgi_server import serve_asgi
+try:
+    serve_asgi({self.args.app!r}, {self.args.host!r}, {self.args.port})
+except KeyboardInterrupt:
+    pass
+""",
+            ]
+        else:
+            # WSGI mode (default)
+            return [
+                sys.executable,
+                "-c",
+                f"""
+import sys
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
+)
+from minicorn.wsgi_server import serve
 try:
     serve({self.args.app!r}, {self.args.host!r}, {self.args.port})
 except KeyboardInterrupt:
     pass
 """,
-        ]
+            ]
     
     def start_server(self):
         """Start the server as a subprocess."""
@@ -221,30 +242,59 @@ except KeyboardInterrupt:
 
 def run_server_direct(args:argparse.Namespace):
     """Run the server directly in the current process (no reload)."""
-    try:
-        app = load_app(args.app)
-    except (ValueError, ImportError, AttributeError, TypeError) as e:
-        log.error("Failed to load application: %s", e)
-        sys.exit(1)
+    if getattr(args, 'asgi', False):
+        # ASGI mode
+        from minicorn.asgi_server import ASGIServer, load_app as load_asgi_app
+        try:
+            app = load_asgi_app(args.app)
+        except (ValueError, ImportError, AttributeError, TypeError) as e:
+            log.error("Failed to load ASGI application: %s", e)
+            sys.exit(1)
         
-    server = Server(app,args.host,args.port)
-    
-    def signal_handler(signum, frame):
-        log.info("Received shutdown signal")
-        server.signal_exit()
-    
-    signal.signal(signal.SIGINT,signal_handler)
-    signal.signal(signal.SIGTERM,signal_handler)
-    
-    try:
-        server.serve()
-    except OSError as e:
-        log.error("Server error: %s", e)
-        sys.exit(1)
-    except KeyboardInterrupt:
-        log.info("Interrupted")
-    finally:
-        server.shutdown()
+        server = ASGIServer(app, args.host, args.port)
+        
+        def signal_handler(signum, frame):
+            log.info("Received shutdown signal")
+            server.signal_exit()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        try:
+            server.serve()
+        except OSError as e:
+            log.error("Server error: %s", e)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            log.info("Interrupted")
+        finally:
+            server.shutdown()
+    else:
+        # WSGI mode (default)
+        try:
+            app = load_app(args.app)
+        except (ValueError, ImportError, AttributeError, TypeError) as e:
+            log.error("Failed to load application: %s", e)
+            sys.exit(1)
+            
+        server = Server(app,args.host,args.port)
+        
+        def signal_handler(signum, frame):
+            log.info("Received shutdown signal")
+            server.signal_exit()
+        
+        signal.signal(signal.SIGINT,signal_handler)
+        signal.signal(signal.SIGTERM,signal_handler)
+        
+        try:
+            server.serve()
+        except OSError as e:
+            log.error("Server error: %s", e)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            log.info("Interrupted")
+        finally:
+            server.shutdown()
 
 
 # CLI Entry Point
@@ -292,6 +342,13 @@ Examples:
     )
     
     parser.add_argument(
+        "--asgi",
+        action="store_true",
+        default=False,
+        help="Run as ASGI server (for FastAPI, Starlette, etc.)",
+    )
+    
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -308,6 +365,10 @@ def main(args: Optional[list[str]] = None) -> int:
     print(f"\033[1m\033[34mminicorn\033[0m v{__version__}")
     print(f"Running \033[1m{parsed_args.app}\033[0m")
     print(f"Address: http://{parsed_args.host}:{parsed_args.port}")
+    if parsed_args.asgi:
+        print("\033[36mASGI mode\033[0m")
+    else:
+        print("\033[35mWSGI mode\033[0m")
     if parsed_args.reload:
         print("\033[33mAuto-reload enabled (development mode)\033[0m")
     print()

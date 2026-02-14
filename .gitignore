@@ -7,3 +7,6 @@ CLI_AND_SERVER_DEEP_DIVE.md
 DEEP_DIVE_EXECUTION.md
 .dockerignore
 Dockerfile
+django_app.py
+flask_app.py
+fastapi_app.py
