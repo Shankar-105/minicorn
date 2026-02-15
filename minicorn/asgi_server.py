@@ -2,10 +2,13 @@
 minicorn/asgi_server.py — Production-grade asynchronous ASGI server core.
 Designed to serve ASGI 3.0 compliant applications (FastAPI, Starlette, etc.)
 using Python's asyncio for concurrent request handling.
+Supports both HTTP/1.1 and WebSocket (RFC 6455) on the same port.
 """
 
 import asyncio
-import socket
+import base64
+import hashlib
+import struct
 import sys
 import datetime
 import logging
@@ -23,16 +26,41 @@ RECV_TIMEOUT = 10.0                 # seconds before recv times out (408)
 KEEP_ALIVE_TIMEOUT = 15.0           # idle timeout between kept-alive requests
 MAX_KEEP_ALIVE_REQUESTS = 100       # max requests per single TCP connection
 RECV_CHUNK = 8192                   # bytes per recv call
+WS_MAX_MESSAGE_SIZE = 16 * 1024 * 1024  # 16 MB max WebSocket message
+
+# WebSocket constants (RFC 6455)
+WS_MAGIC_STRING = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_OPCODE_CONTINUATION = 0x00
+WS_OPCODE_TEXT = 0x01
+WS_OPCODE_BINARY = 0x02
+WS_OPCODE_CLOSE = 0x08
+WS_OPCODE_PING = 0x09
+WS_OPCODE_PONG = 0x0A
+
+# WebSocket close codes
+WS_CLOSE_NORMAL = 1000
+WS_CLOSE_GOING_AWAY = 1001
+WS_CLOSE_PROTOCOL_ERROR = 1002
+WS_CLOSE_UNSUPPORTED_DATA = 1003
+WS_CLOSE_NO_STATUS = 1005
+WS_CLOSE_ABNORMAL = 1006
+WS_CLOSE_INVALID_PAYLOAD = 1007
+WS_CLOSE_POLICY_VIOLATION = 1008
+WS_CLOSE_MESSAGE_TOO_BIG = 1009
+WS_CLOSE_INTERNAL_ERROR = 1011
 
 # Module-level logger (configured by CLI or calling code)
 log = logging.getLogger("minicorn")
 
 # HTTP status code helpers
 _STATUS_PHRASES = {
+    101: "Switching Protocols",
     200: "OK",
     400: "Bad Request",
+    403: "Forbidden",
     408: "Request Timeout",
     413: "Payload Too Large",
+    426: "Upgrade Required",
     431: "Request Header Fields Too Large",
     500: "Internal Server Error",
     502: "Bad Gateway",
@@ -58,6 +86,61 @@ def _build_error_response(status_code: int, message: str = "") -> bytes:
         f"Connection: close\r\n"
         f"\r\n"
     ).encode("utf-8") + body
+
+
+# WebSocket helpers
+
+def _compute_ws_accept_key(key: str) -> str:
+    """
+    Compute ``Sec-WebSocket-Accept`` value per RFC 6455 §4.2.2.
+    accept = base64( sha1( key + MAGIC ) )
+    """
+    digest = hashlib.sha1(
+        (key.strip() + WS_MAGIC_STRING).encode("ascii")
+    ).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _is_websocket_upgrade(request: dict) -> bool:
+    """
+    Return True if the parsed HTTP request is a valid WebSocket upgrade.
+
+    Checks:
+        - ``Upgrade`` header contains ``websocket`` (case-insensitive)
+        - ``Connection`` header contains ``upgrade`` (case-insensitive)
+        - ``Sec-WebSocket-Version`` is ``13``
+        - ``Sec-WebSocket-Key`` is present
+    """
+    headers = request["headers"]
+    upgrade = headers.get("upgrade", "").lower()
+    connection = headers.get("connection", "").lower()
+    version = headers.get("sec-websocket-version", "")
+    key = headers.get("sec-websocket-key", "")
+
+    return (
+        "websocket" in upgrade
+        and "upgrade" in connection
+        and version == "13"
+        and len(key) > 0
+    )
+
+
+def _build_ws_accept_response(key: str, subprotocol: Optional[str] = None) -> bytes:
+    """Build the HTTP 101 Switching Protocols response for WebSocket."""
+    accept = _compute_ws_accept_key(key)
+    lines = [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Accept: {accept}",
+        f"Server: minicorn",
+        f"Date: {_http_date()}",
+    ]
+    if subprotocol:
+        lines.append(f"Sec-WebSocket-Protocol: {subprotocol}")
+    lines.append("")
+    lines.append("")
+    return "\r\n".join(lines).encode("latin-1")
 
 
 def load_app(app_path: str) -> Callable:
@@ -196,7 +279,12 @@ def _build_scope(
     server_host: str,
     server_port: int,
 ) -> dict:
-    """Build ASGI scope dict from parsed request."""
+    """
+    Build ASGI scope dict from parsed request.
+
+    Automatically detects WebSocket upgrade requests and returns a
+    ``"websocket"`` scope instead of ``"http"`` when appropriate.
+    """
     # Convert headers to ASGI format: list of [name, value] byte tuples
     headers = [
         (name.encode("latin-1"), value.encode("latin-1"))
@@ -205,7 +293,31 @@ def _build_scope(
     
     # Extract HTTP version number (e.g., "HTTP/1.1" -> "1.1")
     http_version = request["version"].replace("HTTP/", "")
-    
+
+    is_ws = _is_websocket_upgrade(request)
+
+    if is_ws:
+        # Parse requested subprotocols from Sec-WebSocket-Protocol header
+        proto_header = request["headers"].get("sec-websocket-protocol", "")
+        subprotocols = [
+            p.strip() for p in proto_header.split(",") if p.strip()
+        ] if proto_header else []
+
+        return {
+            "type": "websocket",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": http_version,
+            "scheme": "ws",
+            "path": request["path"],
+            "raw_path": request["raw_path"].encode("latin-1"),
+            "query_string": request["query_string"],
+            "root_path": "",
+            "headers": headers,
+            "server": (server_host, server_port),
+            "client": client_addr,
+            "subprotocols": subprotocols,
+        }
+
     return {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -348,6 +460,335 @@ class ASGIResponseHandler:
             self.response_complete = True
 
 
+# WebSocket frame I/O and ASGI handler
+
+async def _ws_read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
+    """Read exactly *n* bytes from *reader*, raising on premature EOF."""
+    data = b""
+    while len(data) < n:
+        chunk = await reader.read(n - len(data))
+        if not chunk:
+            raise ConnectionError("WebSocket connection closed during read")
+        data += chunk
+    return data
+
+
+def _ws_apply_mask(data: bytes, mask: bytes) -> bytes:
+    """XOR *data* with 4-byte *mask* (RFC 6455 §5.3)."""
+    ba = bytearray(data)
+    for i in range(len(ba)):
+        ba[i] ^= mask[i % 4]
+    return bytes(ba)
+
+
+def _ws_build_frame(
+    opcode: int,
+    payload: bytes = b"",
+    fin: bool = True,
+) -> bytes:
+    """
+    Build a WebSocket frame to send from the server.
+
+    Server frames are never masked (RFC 6455 §5.1).
+    Supports 7-bit, 16-bit, and 64-bit payload lengths.
+    """
+    first_byte = (0x80 if fin else 0x00) | (opcode & 0x0F)
+    length = len(payload)
+
+    if length <= 125:
+        header = struct.pack("!BB",first_byte,length)
+    elif length <= 0xFFFF:
+        header = struct.pack("!BBH",first_byte,126,length)
+    else:
+        header = struct.pack("!BBQ",first_byte,127,length)
+    return header + payload
+
+class WebSocketHandler:
+    """
+    Manages the full lifecycle of a single WebSocket connection:
+    handshake completion, frame I/O, and ASGI event translation.
+
+    The handler exposes ``receive`` and ``send`` async callables that
+    are passed to the ASGI application as the second and third arguments.
+    """
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        request: dict,
+        client_addr: tuple,
+    ):
+        self.reader = reader
+        self.writer = writer
+        self.request = request
+        self.client_addr = client_addr
+
+        # Connection state
+        self.accepted = False
+        self.closed = False
+        self.close_code: int = WS_CLOSE_NORMAL
+        self.close_sent = False
+        self.close_received = False
+        self.chosen_subprotocol: Optional[str] = None
+
+        # For continuation-frame reassembly
+        self._frag_opcode: Optional[int] = None
+        self._frag_buffer: bytearray = bytearray()
+
+    # ASGI receive callable
+
+    async def receive(self) -> dict:
+        """
+        ASGI receive callable for WebSocket connections.
+
+        Before ``websocket.accept`` is sent by the app, returns a
+        ``websocket.connect`` event.  After acceptance, reads frames
+        and translates them into ``websocket.receive`` or
+        ``websocket.disconnect`` events.
+        """
+        if not self.accepted:
+            # The ASGI app has not yet accepted the connection.
+            return {"type": "websocket.connect"}
+
+        if self.closed:
+            return {"type": "websocket.disconnect", "code": self.close_code}
+
+        # Read frames until we have a complete application message
+        while True:
+            try:
+                fin, opcode, payload = await self._read_frame()
+            except (ConnectionError, asyncio.IncompleteReadError):
+                self.closed = True
+                self.close_code = WS_CLOSE_ABNORMAL
+                return {"type": "websocket.disconnect", "code": self.close_code}
+            except ValueError:
+                # Protocol error — send close and disconnect
+                await self._send_close(WS_CLOSE_PROTOCOL_ERROR)
+                self.closed = True
+                self.close_code = WS_CLOSE_PROTOCOL_ERROR
+                return {"type": "websocket.disconnect", "code": self.close_code}
+
+            # Control frames (always fin=1, payload ≤ 125)
+            if opcode == WS_OPCODE_PING:
+                # Auto-respond with pong (same payload)
+                await self._write_frame(WS_OPCODE_PONG, payload)
+                continue
+
+            if opcode == WS_OPCODE_PONG:
+                # pong — ignore
+                continue
+
+            if opcode == WS_OPCODE_CLOSE:
+                code = WS_CLOSE_NORMAL
+                if len(payload) >= 2:
+                    code = struct.unpack("!H", payload[:2])[0]
+                self.close_received = True
+                if not self.close_sent:
+                    await self._send_close(code)
+                self.closed = True
+                self.close_code = code
+                return {"type": "websocket.disconnect", "code": code}
+
+            #  Data frames 
+            if opcode in (WS_OPCODE_TEXT, WS_OPCODE_BINARY):
+                if not fin:
+                    # Start of a fragmented message
+                    self._frag_opcode = opcode
+                    self._frag_buffer = bytearray(payload)
+                    continue
+                # Unfragmented message
+                return self._message_event(opcode, payload)
+
+            if opcode == WS_OPCODE_CONTINUATION:
+                if self._frag_opcode is None:
+                    raise ValueError("Unexpected continuation frame")
+                self._frag_buffer.extend(payload)
+                if len(self._frag_buffer) > WS_MAX_MESSAGE_SIZE:
+                    await self._send_close(WS_CLOSE_MESSAGE_TOO_BIG)
+                    self.closed = True
+                    self.close_code = WS_CLOSE_MESSAGE_TOO_BIG
+                    return {"type": "websocket.disconnect", "code": self.close_code}
+                if fin:
+                    event = self._message_event(
+                        self._frag_opcode, bytes(self._frag_buffer)
+                    )
+                    self._frag_opcode = None
+                    self._frag_buffer = bytearray()
+                    return event
+                continue
+
+            # Unknown opcode — protocol error
+            await self._send_close(WS_CLOSE_PROTOCOL_ERROR)
+            self.closed = True
+            self.close_code = WS_CLOSE_PROTOCOL_ERROR
+            return {"type": "websocket.disconnect", "code": self.close_code}
+
+    # ASGI send callable
+
+    async def send(self, message: dict):
+        """
+        ASGI send callable for WebSocket connections.
+
+        Handles ``websocket.accept``, ``websocket.send``, and
+        ``websocket.close`` message types.
+        """
+        msg_type = message.get("type", "")
+
+        if msg_type == "websocket.accept":
+            await self._do_accept(message)
+
+        elif msg_type == "websocket.send":
+            if not self.accepted or self.closed:
+                raise RuntimeError(
+                    "Cannot send on a WebSocket that is not accepted or is closed"
+                )
+            text = message.get("text")
+            data = message.get("bytes")
+            if text is not None:
+                await self._write_frame(WS_OPCODE_TEXT, text.encode("utf-8"))
+            elif data is not None:
+                await self._write_frame(WS_OPCODE_BINARY, data)
+            else:
+                raise ValueError("websocket.send must include 'text' or 'bytes'")
+
+        elif msg_type == "websocket.close":
+            code = message.get("code", WS_CLOSE_NORMAL)
+            if not self.accepted:
+                # Reject before handshake — send HTTP 403
+                self.writer.write(
+                    _build_error_response(403, "WebSocket rejected")
+                )
+                await self.writer.drain()
+                self.closed = True
+                self.close_code = code
+            elif not self.closed:
+                await self._send_close(code)
+                self.closed = True
+                self.close_code = code
+
+        elif msg_type == "websocket.http.response.start":
+            # Some ASGI apps send an HTTP response to reject the upgrade
+            pass
+
+        elif msg_type == "websocket.http.response.body":
+            pass
+
+    # Internal handshake / framing
+
+    async def _do_accept(self, message: dict):
+        """Complete the WebSocket handshake by sending 101."""
+        self.chosen_subprotocol = message.get("subprotocol")
+        headers = message.get("headers", [])
+
+        ws_key = self.request["headers"].get("sec-websocket-key", "")
+        accept_key = _compute_ws_accept_key(ws_key)
+
+        # Build 101 response
+        lines = [
+            "HTTP/1.1 101 Switching Protocols",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Accept: {accept_key}",
+            "Server: minicorn",
+            f"Date: {_http_date()}",
+        ]
+        if self.chosen_subprotocol:
+            lines.append(f"Sec-WebSocket-Protocol: {self.chosen_subprotocol}")
+
+        # Extra headers from the ASGI app
+        for name, value in headers:
+            if isinstance(name, bytes):
+                name = name.decode("latin-1")
+            if isinstance(value, bytes):
+                value = value.decode("latin-1")
+            lines.append(f"{name}: {value}")
+
+        lines.append("")
+        lines.append("")
+        self.writer.write("\r\n".join(lines).encode("latin-1"))
+        await self.writer.drain()
+
+        self.accepted = True
+        log.info(
+            "%s:%s - WebSocket accepted on %s",
+            self.client_addr[0], self.client_addr[1],
+            self.request["path"],
+        )
+
+    async def _read_frame(self) -> tuple:
+        """
+        Read one WebSocket frame from the wire.
+
+        Returns ``(fin: bool, opcode: int, payload: bytes)``.
+        Client frames MUST be masked; unmasked frames raise ``ValueError``.
+        """
+        # First 2 bytes: FIN/RSV/opcode + MASK/length
+        head = await _ws_read_exact(self.reader, 2)
+        first, second = head[0], head[1]
+
+        fin = bool(first & 0x80)
+        rsv = (first >> 4) & 0x07
+        if rsv:
+            raise ValueError("RSV bits set without negotiated extension")
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        length = second & 0x7F
+
+        # Clients MUST mask frames
+        if not masked:
+            raise ValueError("Client frame is not masked")
+
+        # Extended payload length
+        if length == 126:
+            raw = await _ws_read_exact(self.reader, 2)
+            length = struct.unpack("!H", raw)[0]
+        elif length == 127:
+            raw = await _ws_read_exact(self.reader, 8)
+            length = struct.unpack("!Q", raw)[0]
+
+        if length > WS_MAX_MESSAGE_SIZE:
+            raise ValueError("Frame payload too large")
+
+        # Masking key (4 bytes)
+        mask = await _ws_read_exact(self.reader, 4)
+
+        # Payload
+        payload = await _ws_read_exact(self.reader, length) if length else b""
+        payload = _ws_apply_mask(payload, mask)
+
+        return fin, opcode, payload
+
+    async def _write_frame(self, opcode: int, payload: bytes = b""):
+        """Write a single WebSocket frame (server → client, unmasked)."""
+        self.writer.write(_ws_build_frame(opcode, payload))
+        await self.writer.drain()
+
+    async def _send_close(self, code: int = WS_CLOSE_NORMAL):
+        """Send a WebSocket close frame with the given status code."""
+        if self.close_sent:
+            return
+        self.close_sent = True
+        payload = struct.pack("!H", code)
+        try:
+            await self._write_frame(WS_OPCODE_CLOSE, payload)
+        except Exception:
+            pass  # Ignore write errors during close
+
+    @staticmethod
+    def _message_event(opcode: int, payload: bytes) -> dict:
+        """Translate a data frame into an ASGI websocket.receive event."""
+        if opcode == WS_OPCODE_TEXT:
+            return {
+                "type": "websocket.receive",
+                "text": payload.decode("utf-8", errors="replace"),
+            }
+        return {
+            "type": "websocket.receive",
+            "bytes": payload,
+        }
+
+
 class ASGIServer:
     """
     An asynchronous ASGI server instance.
@@ -486,6 +927,17 @@ class ASGIServer:
                 
                 # Build ASGI scope
                 scope = _build_scope(request, client_addr, self.host, self.port)
+
+                #  WebSocket branch 
+                if scope["type"] == "websocket":
+                    await self._handle_websocket(
+                        scope, request, reader, writer, client_addr,
+                    )
+                    # WebSocket connections are persistent — no keep-alive
+                    # loop; exit after the WS session ends.
+                    return
+
+                #  HTTP branch 
                 
                 # Create response handler
                 handler = ASGIResponseHandler(
@@ -529,6 +981,44 @@ class ASGIServer:
                 client_addr[0], client_addr[1], requests_served
             )
 
+    # WebSocket connection handler
+
+    async def _handle_websocket(
+        self,
+        scope: dict,
+        request: dict,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        client_addr: tuple,
+    ):
+        """
+        Drive the ASGI WebSocket lifecycle for a single connection.
+        1. Create a ``WebSocketHandler`` (receive/send callables).
+        2. Invoke ``self.app(scope, receive, send)``.
+        3. On exit, send a close frame if the app did not.
+        """
+        handler = WebSocketHandler(reader, writer, request, client_addr)
+
+        try:
+            await self.app(scope, handler.receive, handler.send)
+        except Exception as exc:
+            log.error(
+                "%s:%s - WebSocket app error: %s",
+                client_addr[0], client_addr[1], exc,
+                exc_info=True,
+            )
+        finally:
+            # Ensure a close frame was sent
+            if handler.accepted and not handler.close_sent:
+                try:
+                    await handler._send_close(WS_CLOSE_GOING_AWAY)
+                except Exception:
+                    pass
+            log.info(
+                "%s:%s - WebSocket closed (code=%d) on %s",
+                client_addr[0], client_addr[1],
+                handler.close_code, request["path"],
+            )
 
 def serve_asgi(app_path: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
     """
