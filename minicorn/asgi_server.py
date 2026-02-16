@@ -518,6 +518,8 @@ class WebSocketHandler:
         writer: asyncio.StreamWriter,
         request: dict,
         client_addr: tuple,
+        ping_interval: Optional[float] = None,
+        ping_timeout: Optional[float] = None,
     ):
         self.reader = reader
         self.writer = writer
@@ -535,6 +537,12 @@ class WebSocketHandler:
         # For continuation-frame reassembly
         self._frag_opcode: Optional[int] = None
         self._frag_buffer: bytearray = bytearray()
+
+        # Transport-level ping/pong keep-alive
+        self._ping_interval: Optional[float] = ping_interval
+        self._ping_timeout: Optional[float] = ping_timeout
+        self._pong_received: asyncio.Event = asyncio.Event()
+        self._ping_task: Optional[asyncio.Task] = None
 
     # ASGI receive callable
 
@@ -559,8 +567,9 @@ class WebSocketHandler:
             try:
                 fin, opcode, payload = await self._read_frame()
             except (ConnectionError, asyncio.IncompleteReadError):
+                if not self.closed:
+                    self.close_code = WS_CLOSE_ABNORMAL
                 self.closed = True
-                self.close_code = WS_CLOSE_ABNORMAL
                 return {"type": "websocket.disconnect", "code": self.close_code}
             except ValueError:
                 # Protocol error — send close and disconnect
@@ -576,7 +585,8 @@ class WebSocketHandler:
                 continue
 
             if opcode == WS_OPCODE_PONG:
-                # pong — ignore
+                # Signal the ping loop that a pong was received
+                self._pong_received.set()
                 continue
 
             if opcode == WS_OPCODE_CLOSE:
@@ -710,11 +720,82 @@ class WebSocketHandler:
         await self.writer.drain()
 
         self.accepted = True
+
+        # Start the transport-level ping loop if configured
+        if self._ping_interval is not None:
+            self._ping_task = asyncio.create_task(self._ping_loop())
+
         log.info(
             "%s:%s - WebSocket accepted on %s",
             self.client_addr[0], self.client_addr[1],
             self.request["path"],
         )
+
+    async def _ping_loop(self):
+        """
+        Background task: periodically send WebSocket ping frames.
+
+        Runs for the lifetime of the connection.  Sends a ping every
+        ``_ping_interval`` seconds.  If ``_ping_timeout`` is also set,
+        waits up to that many seconds for a pong reply — on timeout
+        the connection is closed with code 1001 (Going Away) and the
+        underlying transport is shut down so that any blocked
+        ``_read_frame()`` call unblocks immediately.
+        """
+        try:
+            while not self.closed:
+                # Sleep for the configured interval
+                await asyncio.sleep(self._ping_interval)
+                if self.closed:
+                    break
+
+                # Clear the flag so we can detect the *next* pong
+                self._pong_received.clear()
+
+                # Send a ping frame to the client
+                try:
+                    await self._write_frame(WS_OPCODE_PING, b"minicorn")
+                except Exception:
+                    break  # Socket already dead
+
+                log.debug(
+                    "%s:%s - WebSocket ping sent",
+                    self.client_addr[0], self.client_addr[1],
+                )
+
+                # If a timeout is configured, wait for the pong
+                if self._ping_timeout is not None:
+                    try:
+                        await asyncio.wait_for(
+                            self._pong_received.wait(),
+                            timeout=self._ping_timeout,
+                        )
+                        log.debug(
+                            "%s:%s - WebSocket pong received",
+                            self.client_addr[0], self.client_addr[1],
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning(
+                            "%s:%s - WebSocket pong timeout "
+                            "(no pong within %.1fs) — closing connection",
+                            self.client_addr[0], self.client_addr[1],
+                            self._ping_timeout,
+                        )
+                        # Mark as closed and send close frame
+                        self.close_code = WS_CLOSE_GOING_AWAY
+                        self.closed = True
+                        await self._send_close(WS_CLOSE_GOING_AWAY)
+                        # Shut down the transport to unblock _read_frame()
+                        try:
+                            self.writer.close()
+                        except Exception:
+                            pass
+                        return
+        except asyncio.CancelledError:
+            # Normal: task is cancelled when the connection ends
+            return
+        except Exception as exc:
+            log.debug("Ping loop error: %s", exc)
 
     async def _read_frame(self) -> tuple:
         """
@@ -769,7 +850,7 @@ class WebSocketHandler:
         if self.close_sent:
             return
         self.close_sent = True
-        payload = struct.pack("!H", code)
+        payload = struct.pack("!H",code)
         try:
             await self._write_frame(WS_OPCODE_CLOSE, payload)
         except Exception:
@@ -804,10 +885,14 @@ class ASGIServer:
         app: Callable,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
+        ws_ping_interval: Optional[float] = None,
+        ws_ping_timeout: Optional[float] = None,
     ):
         self.app = app
         self.host = host
         self.port = port
+        self.ws_ping_interval = ws_ping_interval
+        self.ws_ping_timeout = ws_ping_timeout
         self.should_exit = False
         self._server: Optional[asyncio.Server] = None
     
@@ -843,6 +928,12 @@ class ASGIServer:
         
         log.info("Started ASGI server process [%d]", os.getpid())
         log.info("Listening on http://%s:%s", self.host, self.port)
+        if self.ws_ping_interval is not None:
+            log.info(
+                "WebSocket ping: interval=%.1fs, timeout=%s",
+                self.ws_ping_interval,
+                f"{self.ws_ping_timeout:.1f}s" if self.ws_ping_timeout else "disabled",
+            )
         
         # Setup signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
@@ -997,7 +1088,11 @@ class ASGIServer:
         2. Invoke ``self.app(scope, receive, send)``.
         3. On exit, send a close frame if the app did not.
         """
-        handler = WebSocketHandler(reader, writer, request, client_addr)
+        handler = WebSocketHandler(
+            reader, writer, request, client_addr,
+            ping_interval=self.ws_ping_interval,
+            ping_timeout=self.ws_ping_timeout,
+        )
 
         try:
             await self.app(scope, handler.receive, handler.send)
@@ -1008,6 +1103,13 @@ class ASGIServer:
                 exc_info=True,
             )
         finally:
+            # Cancel the ping task if it is running
+            if handler._ping_task is not None:
+                handler._ping_task.cancel()
+                try:
+                    await handler._ping_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             # Ensure a close frame was sent
             if handler.accepted and not handler.close_sent:
                 try:
@@ -1020,26 +1122,50 @@ class ASGIServer:
                 handler.close_code, request["path"],
             )
 
-def serve_asgi(app_path: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
+def serve_asgi(
+    app_path: str,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    ws_ping_interval: Optional[float] = None,
+    ws_ping_timeout: Optional[float] = None,
+):
     """
     Load and serve an ASGI application.
     Args:
         app_path: Module path in format "module:attribute" (e.g., "main:app")
         host: Host address to bind to
         port: Port number to bind to
+        ws_ping_interval: Seconds between WebSocket pings (None = disabled)
+        ws_ping_timeout: Seconds to wait for pong before closing (None = no timeout)
     """
     app = load_app(app_path)
-    server = ASGIServer(app, host, port)
+    server = ASGIServer(
+        app, host, port,
+        ws_ping_interval=ws_ping_interval,
+        ws_ping_timeout=ws_ping_timeout,
+    )
     server.serve()
 
 
-def run_asgi(app: Callable, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
+def run_asgi(
+    app: Callable,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    ws_ping_interval: Optional[float] = None,
+    ws_ping_timeout: Optional[float] = None,
+):
     """
     Serve an ASGI application directly (already imported).
     Args:
         app: An ASGI callable
         host: Host address to bind to
         port: Port number to bind to
+        ws_ping_interval: Seconds between WebSocket pings (None = disabled)
+        ws_ping_timeout: Seconds to wait for pong before closing (None = no timeout)
     """
-    server = ASGIServer(app, host, port)
+    server = ASGIServer(
+        app, host, port,
+        ws_ping_interval=ws_ping_interval,
+        ws_ping_timeout=ws_ping_timeout,
+    )
     server.serve()

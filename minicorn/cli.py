@@ -97,7 +97,7 @@ logging.basicConfig(
 )
 from minicorn.asgi_server import serve_asgi
 try:
-    serve_asgi({self.args.app!r}, {self.args.host!r}, {self.args.port})
+    serve_asgi({self.args.app!r}, {self.args.host!r}, {self.args.port}, ws_ping_interval={getattr(self.args, 'ws_ping_interval', None)!r}, ws_ping_timeout={getattr(self.args, 'ws_ping_timeout', None)!r})
 except KeyboardInterrupt:
     pass
 """,
@@ -251,7 +251,11 @@ def run_server_direct(args:argparse.Namespace):
             log.error("Failed to load ASGI application: %s", e)
             sys.exit(1)
         
-        server = ASGIServer(app, args.host, args.port)
+        server = ASGIServer(
+            app, args.host, args.port,
+            ws_ping_interval=getattr(args, 'ws_ping_interval', None),
+            ws_ping_timeout=getattr(args, 'ws_ping_timeout', None),
+        )
         
         def signal_handler(signum, frame):
             log.info("Received shutdown signal")
@@ -349,6 +353,24 @@ Examples:
     )
     
     parser.add_argument(
+        "--ws-ping-interval",
+        type=float,
+        default=None,
+        help="WebSocket ping interval in seconds. The server sends a ping "
+             "frame to each connected client every N seconds to detect "
+             "dead connections. Only active in ASGI mode. Disabled by default.",
+    )
+    
+    parser.add_argument(
+        "--ws-ping-timeout",
+        type=float,
+        default=None,
+        help="WebSocket ping timeout in seconds. Close the connection if no "
+             "pong is received within N seconds after a ping was sent. "
+             "Requires --ws-ping-interval. Disabled by default.",
+    )
+    
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -367,6 +389,16 @@ def main(args: Optional[list[str]] = None) -> int:
     print(f"Address: http://{parsed_args.host}:{parsed_args.port}")
     if parsed_args.asgi:
         print("\033[36mASGI mode\033[0m")
+        if parsed_args.ws_ping_interval is not None:
+            timeout_str = (
+                f"{parsed_args.ws_ping_timeout}s"
+                if parsed_args.ws_ping_timeout is not None
+                else "disabled"
+            )
+            print(
+                f"\033[36mWebSocket ping: interval={parsed_args.ws_ping_interval}s, "
+                f"timeout={timeout_str}\033[0m"
+            )
     else:
         print("\033[35mWSGI mode\033[0m")
     if parsed_args.reload:
