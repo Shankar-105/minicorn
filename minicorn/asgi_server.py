@@ -8,6 +8,7 @@ Supports both HTTP/1.1 and WebSocket (RFC 6455) on the same port.
 import asyncio
 import base64
 import hashlib
+import socket
 import struct
 import sys
 import datetime
@@ -919,12 +920,32 @@ class ASGIServer:
     async def _serve_async(self):
         """Main async server loop."""
         import os
-        self._server = await asyncio.start_server(
-            self._handle_connection,
-            self.host,
-            self.port,
-            reuse_address=True,
-        )
+        # On Windows, reuse_address=True sets SO_REUSEADDR which allows multiple
+        # processes to bind to the same port (port hijacking). Disable it on
+        # Windows and rely on SO_EXCLUSIVEADDRUSE via start_server's default.
+        # On Linux/macOS, SO_REUSEADDR is safe and only allows reusing TIME_WAIT ports.
+        if sys.platform == "win32":
+            self._server = await asyncio.start_server(
+                self._handle_connection,
+                self.host,
+                self.port,
+                reuse_address=False,
+            )
+            # Set SO_EXCLUSIVEADDRUSE on the underlying socket(s) to prevent
+            # another process from binding to the same port.
+            for sock in self._server.sockets:
+                sock.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_EXCLUSIVEADDRUSE,  # type: ignore[attr-defined]
+                    1,
+                )
+        else:
+            self._server = await asyncio.start_server(
+                self._handle_connection,
+                self.host,
+                self.port,
+                reuse_address=True,
+            )
         
         log.info("Started ASGI server process [%d]", os.getpid())
         log.info("Listening on http://%s:%s", self.host, self.port)

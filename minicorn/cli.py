@@ -1,6 +1,5 @@
 """
 minicorn/cli.py — Command-line interface for the minicorn WSGI server.
-
 Provides Uvicorn/Gunicorn-like CLI experience with auto-reload support.
 """
 import argparse
@@ -15,6 +14,15 @@ from typing import Optional
 
 from minicorn import __version__
 from minicorn.wsgi_server import Server, load_app, DEFAULT_HOST, DEFAULT_PORT
+
+# Valid log level names (for CLI validation)
+LOG_LEVELS = {
+    "critical": logging.CRITICAL,
+    "error": logging.ERROR,
+    "warning": logging.WARNING,
+    "info": logging.INFO,
+    "debug": logging.DEBUG,
+}
 
 # Configure logging with nice formatting
 def setup_logging(level: int = logging.INFO):
@@ -85,6 +93,8 @@ class ReloadManager:
         """Build the command line args to run the server subprocess."""
         if getattr(self.args, 'asgi', False):
             # ASGI mode
+            log_level = getattr(self.args, 'log_level', 'info')
+            log_level_int = LOG_LEVELS.get(log_level,logging.INFO)
             return [
                 sys.executable,
                 "-c",
@@ -92,7 +102,7 @@ class ReloadManager:
 import sys
 import logging
 logging.basicConfig(
-    level=logging.INFO,
+    level={log_level_int},
     format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
 )
 from minicorn.asgi_server import serve_asgi
@@ -104,6 +114,8 @@ except KeyboardInterrupt:
             ]
         else:
             # WSGI mode (default)
+            log_level = getattr(self.args, 'log_level', 'info')
+            log_level_int = LOG_LEVELS.get(log_level, logging.INFO)
             return [
                 sys.executable,
                 "-c",
@@ -111,7 +123,7 @@ except KeyboardInterrupt:
 import sys
 import logging
 logging.basicConfig(
-    level=logging.INFO,
+    level={log_level_int},
     format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
 )
 from minicorn.wsgi_server import serve
@@ -371,6 +383,15 @@ Examples:
     )
     
     parser.add_argument(
+        "--log-level",
+        type=str,
+        default="info",
+        choices=LOG_LEVELS.keys(),
+        help="Set the log level (default: info). Use 'debug' to see "
+             "WebSocket ping/pong frames and other verbose output.",
+    )
+    
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -382,6 +403,10 @@ def main(args: Optional[list[str]] = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
     parsed_args = parser.parse_args(args)
+    
+    # Apply log level from CLI
+    level = LOG_LEVELS[parsed_args.log_level]
+    setup_logging(level)
     
     # Print startup banner
     print(f"\033[1m\033[34mminicorn\033[0m v{__version__}")

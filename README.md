@@ -12,7 +12,7 @@ minicorn provides a simple CLI experience similar to Uvicorn and Gunicorn, desig
 - **Simple CLI** - Uvicorn-like command interface
 - **Zero Dependencies** - Core server requires only Python stdlib (watchdog optional for reload)
 - **Structured Logging** - Clear, colored log output
-- **ASGI Support** - (**BETA** feature)
+- **ASGI Support** - (**BETA** feature not included in documentation to be documented soon!)
 ## Installation
 
 ```bash

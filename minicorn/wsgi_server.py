@@ -442,7 +442,17 @@ class Server:
         """Create, bind, listen, and accept connections in a blocking loop."""
         import os
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            # On Windows, SO_REUSEADDR allows multiple processes to bind to the
+            # same port simultaneously (port hijacking). Use SO_EXCLUSIVEADDRUSE
+            # to prevent this and ensure only one process owns the port.
+            self._server_socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1  # type: ignore[attr-defined]
+            )
+        else:
+            # On Linux/macOS, SO_REUSEADDR only allows reusing ports in
+            # TIME_WAIT state and does NOT allow duplicate active binds.
+            self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
         try:
             self._server_socket.bind((self.host, self.port))
