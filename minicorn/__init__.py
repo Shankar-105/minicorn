@@ -6,7 +6,7 @@ PEP 3333 compliant WSGI applications and ASGI applications (FastAPI, Starlette, 
 with auto-reload support for development.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.1.2"
 __all__ = ["serve", "run", "serve_asgi", "run_asgi"]
 
 # WSGI server exports

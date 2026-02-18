@@ -67,13 +67,11 @@ _STATUS_PHRASES = {
     502: "Bad Gateway",
 }
 
-
 def _http_date() -> str:
     """RFC 7231 date for the Date header."""
     return datetime.datetime.now(datetime.timezone.utc).strftime(
         "%a, %d %b %Y %H:%M:%S GMT"
     )
-
 
 def _build_error_response(status_code: int, message: str = "") -> bytes:
     """Build a minimal, valid HTTP/1.1 error response."""
