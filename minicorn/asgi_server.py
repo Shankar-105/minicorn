@@ -18,6 +18,14 @@ import signal
 from typing import Callable, Any, Optional
 from urllib.parse import unquote
 
+from minicorn.colors import (
+    format_request_log,
+    format_response_log,
+    format_ws_event,
+    _c,
+    _ANSI,
+)
+
 # Default Configuration
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -725,9 +733,10 @@ class WebSocketHandler:
             self._ping_task = asyncio.create_task(self._ping_loop())
 
         log.info(
-            "%s:%s - WebSocket accepted on %s",
-            self.client_addr[0], self.client_addr[1],
-            self.request["path"],
+            format_ws_event(
+                self.client_addr[0], self.client_addr[1],
+                "accepted", self.request["path"],
+            )
         )
 
     async def _ping_loop(self):
@@ -758,8 +767,10 @@ class WebSocketHandler:
                     break  # Socket already dead
 
                 log.debug(
-                    "%s:%s - WebSocket ping sent",
-                    self.client_addr[0], self.client_addr[1],
+                    format_ws_event(
+                        self.client_addr[0], self.client_addr[1],
+                        "ping", "", "sent",
+                    )
                 )
 
                 # If a timeout is configured, wait for the pong
@@ -770,15 +781,19 @@ class WebSocketHandler:
                             timeout=self._ping_timeout,
                         )
                         log.debug(
-                            "%s:%s - WebSocket pong received",
-                            self.client_addr[0], self.client_addr[1],
+                            format_ws_event(
+                                self.client_addr[0], self.client_addr[1],
+                                "pong", "", "received",
+                            )
                         )
                     except asyncio.TimeoutError:
                         log.warning(
-                            "%s:%s - WebSocket pong timeout "
-                            "(no pong within %.1fs) — closing connection",
-                            self.client_addr[0], self.client_addr[1],
-                            self._ping_timeout,
+                            format_ws_event(
+                                self.client_addr[0], self.client_addr[1],
+                                "timeout",
+                                "",
+                                f"no pong within {self._ping_timeout:.1f}s — closing",
+                            )
                         )
                         # Mark as closed and send close frame
                         self.close_code = WS_CLOSE_GOING_AWAY
@@ -1030,9 +1045,10 @@ class ASGIServer:
                     keep_alive = False
                 
                 log.info(
-                    '%s:%s - "%s %s %s"',
-                    client_addr[0], client_addr[1],
-                    request["method"], request["raw_path"], request["version"],
+                    format_request_log(
+                        client_addr[0], client_addr[1],
+                        request["method"], request["raw_path"], request["version"],
+                    )
                 )
                 
                 # Build ASGI scope
@@ -1067,10 +1083,11 @@ class ASGIServer:
                     return
                 
                 log.info(
-                    '%s:%s - "%s %s" %s',
-                    client_addr[0], client_addr[1],
-                    request["method"], request["raw_path"],
-                    handler.response_status,
+                    format_response_log(
+                        client_addr[0], client_addr[1],
+                        request["method"], request["raw_path"],
+                        handler.response_status,
+                    )
                 )
                 requests_served += 1
                 
@@ -1117,8 +1134,10 @@ class ASGIServer:
             await self.app(scope, handler.receive, handler.send)
         except Exception as exc:
             log.error(
-                "%s:%s - WebSocket app error: %s",
-                client_addr[0], client_addr[1], exc,
+                format_ws_event(
+                    client_addr[0], client_addr[1],
+                    "error", request["path"], str(exc),
+                ),
                 exc_info=True,
             )
         finally:
@@ -1136,9 +1155,11 @@ class ASGIServer:
                 except Exception:
                     pass
             log.info(
-                "%s:%s - WebSocket closed (code=%d) on %s",
-                client_addr[0], client_addr[1],
-                handler.close_code, request["path"],
+                format_ws_event(
+                    client_addr[0], client_addr[1],
+                    "closed", request["path"],
+                    f"code={handler.close_code}",
+                )
             )
 
 def serve_asgi(

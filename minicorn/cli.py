@@ -1,6 +1,8 @@
 """
-minicorn/cli.py — Command-line interface for the minicorn WSGI server.
-Provides Uvicorn/Gunicorn-like CLI experience with auto-reload support.
+minicorn/cli.py — Command-line interface for the minicorn WSGI & ASGI server.
+
+Provides Uvicorn/Gunicorn-like CLI experience with auto-reload support,
+colorized logging, and a clean developer-friendly UI.
 """
 import argparse
 import sys
@@ -14,6 +16,16 @@ from typing import Optional
 
 from minicorn import __version__
 from minicorn.wsgi_server import Server, load_app, DEFAULT_HOST, DEFAULT_PORT
+from minicorn.colors import (
+    ColorFormatter,
+    format_banner_title,
+    format_banner_line,
+    format_banner_separator,
+    format_banner_tag,
+    _ANSI,
+    _c,
+    USE_COLOR,
+)
 
 # Valid log level names (for CLI validation)
 LOG_LEVELS = {
@@ -24,15 +36,21 @@ LOG_LEVELS = {
     "debug": logging.DEBUG,
 }
 
-# Configure logging with nice formatting
+# Configure logging with colorized formatter
 def setup_logging(level: int = logging.INFO):
-    """Configure structured logging for the CLI."""
-    logging.basicConfig(
-        level=level,
-        format="\033[32m%(levelname)s\033[0m:     %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    # Also configure the minicorn logger
+    """Configure structured, colorized logging for the CLI."""
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+
+    show_timestamp = (level <= logging.DEBUG)
+    formatter = ColorFormatter(show_timestamp=show_timestamp)
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+
+    logging.basicConfig(level=level, handlers=[handler])
+
     logger = logging.getLogger("minicorn")
     logger.setLevel(level)
     return logger
@@ -99,12 +117,11 @@ class ReloadManager:
                 sys.executable,
                 "-c",
                 f"""
-import sys
-import logging
-logging.basicConfig(
-    level={log_level_int},
-    format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
-)
+import sys, logging
+from minicorn.colors import ColorFormatter
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColorFormatter(show_timestamp={log_level_int <= logging.DEBUG}))
+logging.basicConfig(level={log_level_int}, handlers=[handler])
 from minicorn.asgi_server import serve_asgi
 try:
     serve_asgi({self.args.app!r}, {self.args.host!r}, {self.args.port}, ws_ping_interval={getattr(self.args, 'ws_ping_interval', None)!r}, ws_ping_timeout={getattr(self.args, 'ws_ping_timeout', None)!r})
@@ -120,12 +137,11 @@ except KeyboardInterrupt:
                 sys.executable,
                 "-c",
                 f"""
-import sys
-import logging
-logging.basicConfig(
-    level={log_level_int},
-    format="\\033[32m%(levelname)s\\033[0m:     %(message)s",
-)
+import sys, logging
+from minicorn.colors import ColorFormatter
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColorFormatter(show_timestamp={log_level_int <= logging.DEBUG}))
+logging.basicConfig(level={log_level_int}, handlers=[handler])
 from minicorn.wsgi_server import serve
 try:
     serve({self.args.app!r}, {self.args.host!r}, {self.args.port})
@@ -136,7 +152,6 @@ except KeyboardInterrupt:
     
     def start_server(self):
         """Start the server as a subprocess."""
-        log.info("Starting server subprocess...")
         self.process = subprocess.Popen(
             self._build_subprocess_args(),
             stdout=sys.stdout,
@@ -146,7 +161,6 @@ except KeyboardInterrupt:
     def stop_server(self):
         """Stop the running server subprocess."""
         if self.process and self.process.poll() is None:
-            log.info("Stopping server subprocess...")
             # On Windows, use terminate; on Unix, could use SIGTERM
             self.process.terminate()
             try:
@@ -159,7 +173,10 @@ except KeyboardInterrupt:
     
     def restart_server(self):
         """Restart the server subprocess."""
-        log.info("Restarting server...")
+        log.info(
+            "%s — restarting server...",
+            _c(_ANSI.BOLD + _ANSI.YELLOW, "Detected change"),
+        )
         self.stop_server()
         # Small delay to ensure port is released
         time.sleep(0.5)
@@ -205,7 +222,12 @@ except KeyboardInterrupt:
                 handler_self.last_reload = now
                 
                 event_type = type(event).__name__.replace("Event", "").lower()
-                log.info("Detected %s: %s", event_type, src_path)
+                rel_path = os.path.relpath(src_path)
+                log.info(
+                    "%s %s",
+                    _c(_ANSI.DIM, f"File {event_type}:"),
+                    _c(_ANSI.BOLD + _ANSI.YELLOW, rel_path),
+                )
                 handler_self.manager.restart_server()
         
         # Setup signal handler for graceful shutdown
@@ -224,7 +246,10 @@ except KeyboardInterrupt:
         self.observer.schedule(event_handler, watch_path, recursive=True)
         self.observer.start()
         
-        log.info("Watching for file changes in: %s", watch_path)
+        log.info(
+            "Watching for file changes in: %s",
+            _c(_ANSI.BOLD, watch_path),
+        )
         
         # Start the initial server
         self.start_server()
@@ -319,21 +344,41 @@ def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the CLI."""
     parser = argparse.ArgumentParser(
         prog="minicorn",
-        description="minicorn - A lightweight, production-grade WSGI server",
+        description="minicorn — A lightweight, production-grade WSGI & ASGI server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  minicorn main:app                         Run app from main.py
-  minicorn myproject.api:app --port 8080    Run on custom port
-  minicorn main:app --reload                Run with auto-reload
-  minicorn app:create_app() --host 0.0.0.0  Bind to all interfaces
+\033[1mExamples:\033[0m
+
+  \033[36mWSGI (Flask / Django):\033[0m
+    minicorn main:app                           Run WSGI app from main.py
+    minicorn myproject.api:app --port 8080      Custom port
+    minicorn flask_app:app --reload             Auto-reload on code changes
+    minicorn app:create_app() --host 0.0.0.0    Bind to all interfaces
+
+  \033[36mASGI (FastAPI / Starlette):\033[0m
+    minicorn fastapi_app:app --asgi             Run ASGI app
+    minicorn fastapi_app:app --asgi --reload    ASGI with auto-reload
+    minicorn main:app --asgi --port 3000        ASGI on custom port
+
+  \033[36mWebSocket:\033[0m
+    minicorn fastapi_app:app --asgi                        WS endpoints work automatically
+    minicorn app:app --asgi --ws-ping-interval 20          Server-side WS keep-alive pings
+    minicorn app:app --asgi --ws-ping-interval 20 \\
+                             --ws-ping-timeout 10          Ping + close on pong timeout
+
+  \033[36mDebugging:\033[0m
+    minicorn main:app --log-level debug         Verbose logging (timestamps, frames)
+    minicorn main:app --asgi --log-level debug  Debug ASGI + WebSocket traffic
         """,
     )
     
     parser.add_argument(
         "app",
         metavar="APP",
-        help="WSGI application in format 'module:attribute' (e.g., 'main:app')",
+        help=(
+            "Application in format 'module:attribute' "
+            "(e.g., 'main:app', 'myproject.api:application')"
+        ),
     )
     
     parser.add_argument(
@@ -399,6 +444,68 @@ Examples:
     
     return parser
 
+def _print_startup_banner(args: argparse.Namespace):
+    """Print a clean, colorful startup banner."""
+    print()
+    print(format_banner_title("minicorn", __version__))
+    print(format_banner_separator())
+
+    # App name
+    print(format_banner_line("App", _c(_ANSI.BOLD + _ANSI.WHITE, args.app)))
+
+    # Address
+    url = f"http://{args.host}:{args.port}"
+    print(format_banner_line(
+        "Address",
+        _c(_ANSI.BOLD + _ANSI.UNDERLINE + _ANSI.BRIGHT_CYAN, url),
+    ))
+
+    # Mode
+    if args.asgi:
+        mode_tag = format_banner_tag("ASGI", _ANSI.CYAN)
+    else:
+        mode_tag = format_banner_tag("WSGI", _ANSI.MAGENTA)
+    print(format_banner_line("Mode", mode_tag))
+
+    # WebSocket ping (ASGI only)
+    if args.asgi and args.ws_ping_interval is not None:
+        timeout_str = (
+            f"{args.ws_ping_timeout}s"
+            if args.ws_ping_timeout is not None
+            else "disabled"
+        )
+        ws_info = _c(
+            _ANSI.CYAN,
+            f"interval={args.ws_ping_interval}s, timeout={timeout_str}",
+        )
+        print(format_banner_line("WS Ping", ws_info))
+
+    # Reload
+    if args.reload:
+        print(format_banner_line(
+            "Reload",
+            format_banner_tag("enabled", _ANSI.YELLOW)
+            + _c(_ANSI.DIM, "  (development mode)"),
+        ))
+
+    # Log level
+    level_str = args.log_level.upper()
+    level_colors = {
+        "DEBUG":    _ANSI.CYAN,
+        "INFO":     _ANSI.GREEN,
+        "WARNING":  _ANSI.YELLOW,
+        "ERROR":    _ANSI.RED,
+        "CRITICAL": _ANSI.BOLD + _ANSI.RED,
+    }
+    print(format_banner_line(
+        "Log Level",
+        _c(level_colors.get(level_str, ""), level_str),
+    ))
+
+    print(format_banner_separator())
+    print()
+
+
 def main(args: Optional[list[str]] = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -409,26 +516,7 @@ def main(args: Optional[list[str]] = None) -> int:
     setup_logging(level)
     
     # Print startup banner
-    print(f"\033[1m\033[34mminicorn\033[0m v{__version__}")
-    print(f"Running \033[1m{parsed_args.app}\033[0m")
-    print(f"Address: http://{parsed_args.host}:{parsed_args.port}")
-    if parsed_args.asgi:
-        print("\033[36mASGI mode\033[0m")
-        if parsed_args.ws_ping_interval is not None:
-            timeout_str = (
-                f"{parsed_args.ws_ping_timeout}s"
-                if parsed_args.ws_ping_timeout is not None
-                else "disabled"
-            )
-            print(
-                f"\033[36mWebSocket ping: interval={parsed_args.ws_ping_interval}s, "
-                f"timeout={timeout_str}\033[0m"
-            )
-    else:
-        print("\033[35mWSGI mode\033[0m")
-    if parsed_args.reload:
-        print("\033[33mAuto-reload enabled (development mode)\033[0m")
-    print()
+    _print_startup_banner(parsed_args)
     
     if parsed_args.reload:
         manager = ReloadManager(parsed_args)

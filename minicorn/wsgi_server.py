@@ -13,6 +13,13 @@ from io import BytesIO
 from urllib.parse import unquote
 from typing import Callable, Any, Optional
 
+from minicorn.colors import (
+    format_request_log,
+    format_response_log,
+    _c,
+    _ANSI,
+)
+
 # Default Configuration
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -520,9 +527,10 @@ class Server:
                     keep_alive = False
 
                 log.info(
-                    '%s:%s - "%s %s %s"',
-                    client_addr[0], client_addr[1],
-                    request["method"], request["raw_path"], request["version"],
+                    format_request_log(
+                        client_addr[0], client_addr[1],
+                        request["method"], request["raw_path"], request["version"],
+                    )
                 )
 
                 environ = build_environ(request, client_addr, self.host, self.port)
@@ -558,10 +566,11 @@ class Server:
 
                 status_code = status.split(" ", 1)[0]
                 log.info(
-                    '%s:%s - "%s %s" %s',
-                    client_addr[0], client_addr[1],
-                    request["method"], request["raw_path"],
-                    status_code,
+                    format_response_log(
+                        client_addr[0], client_addr[1],
+                        request["method"], request["raw_path"],
+                        status_code,
+                    )
                 )
                 requests_served += 1
 
