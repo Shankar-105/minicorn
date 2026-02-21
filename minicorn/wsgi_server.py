@@ -278,7 +278,7 @@ def send_response(
     hdr_lines = ""
 
     hdr_lines += f"Date: {_http_date()}\r\n"
-    hdr_lines += "Server: minicorn/1.1.2\r\n"
+    hdr_lines += "Server: minicorn/1.2.0\r\n"
 
     if keep_alive:
         hdr_lines += "Connection: keep-alive\r\n"
