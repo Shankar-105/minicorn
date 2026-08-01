@@ -10,6 +10,6 @@ Dockerfile
 django_app.py
 flask_app.py
 fastapi_app.py
-changes.md
+ALL_ABOUT_WEBSOCKETS.md
 PING_PONG_DEEP_DIVE.md
 WS_PING_PONG_IMPLEMENTATION.md

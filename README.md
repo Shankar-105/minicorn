@@ -1,8 +1,12 @@
 # minicorn 🐣🦄🔥
 
-A lightweight, production-grade Python server that speaks both **WSGI** and **ASGI** — with full **WebSocket** support baked in.
+A lightweight Python server for **development** that runs both **WSGI** and **ASGI** apps — with **WebSocket** support in ASGI mode. 
 
-minicorn gives you a Uvicorn/Gunicorn-like CLI experience with zero heavyweight dependencies, serving everything from classic Flask apps to modern async FastAPI services over the same port.
+```bash
+pip install minicorn[dev]
+```
+
+**_minicorn_** gives you a simple Uvicorn/Gunicorn-style experience for local development, with support for both classic sync apps and modern async apps.
 
 ## Features
 
